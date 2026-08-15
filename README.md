@@ -24,7 +24,7 @@ lazy.nvim local path:
 
 ```lua
 {
-  dir = "/Users/ctw00428/development/projects/personal/tdd-bot.nvim/tdd-bot",
+  dir = "/Users/ctw00428/development/projects/personal/tdd-bot.nvim",
   dependencies = { "nvim-neotest/neotest" },
   config = function()
     require("tdd-bot").setup()
@@ -77,4 +77,3 @@ is told the file, the comment's line number, and the requested refactoring, and 
 instructed to remove the comment once applied. After each refactoring, tests rerun; if the
 refactoring broke anything, the file (disk + buffer) is reverted to its pre-refactoring
 state and the loop stops.
-
