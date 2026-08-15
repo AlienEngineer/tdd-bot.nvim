@@ -1067,17 +1067,35 @@ local function test_repository_has_no_superpowers_docs()
   assert(vim.fn.isdirectory("docs/superpowers") == 0, "expected no superpowers documentation in repository")
 end
 
-local function test_ci_pipeline_runs_plugin_tests()
+local function test_ci_pipeline_tests_and_bumps_version_after_merged_pr()
   local file = assert(io.open(".github/workflows/ci.yml", "r"), "expected CI workflow")
   local workflow = file:read("*a")
   file:close()
 
   assert(workflow:find("pull_request:", 1, true), "expected CI to run for pull requests")
+  assert(workflow:find("types: [opened, synchronize, reopened, closed]", 1, true),
+    "expected CI to handle merged pull requests")
   assert(workflow:find("push:", 1, true), "expected CI to run for pushes")
   assert(workflow:find("workflow_dispatch:", 1, true), "expected CI to support manual runs")
-  assert(workflow:find("contents: read", 1, true), "expected CI to use read-only repository permission")
+  assert(workflow:find("contents: write", 1, true), "expected CI to allow version commits")
   assert(workflow:find("nvim --headless -u NONE -l tests/test_tdd_bot.lua", 1, true),
     "expected CI to run plugin behavior tests")
+  assert(workflow:find("needs: test", 1, true), "expected version bump to wait for tests")
+  assert(workflow:find("github.event.pull_request.merged == true", 1, true),
+    "expected version bump only after merged pull requests")
+  assert(workflow:find("ref: ${{ github.event.pull_request.base.ref }}", 1, true),
+    "expected version bump to target merged base branch")
+  assert(workflow:find("bump-plugin-version-${{ github.event.pull_request.base.ref }}", 1, true),
+    "expected version bumps to serialize per base branch")
+  assert(workflow:find('^local VERSION = "(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)"$', 1, true),
+    "expected version declaration validation")
+  assert(workflow:find('version_pattern="${version//./\\\\.}"', 1, true),
+    "expected version declaration replacement to match literal dots")
+  assert(workflow:find("10#$patch + 1", 1, true), "expected patch version increment")
+  assert(workflow:find("chore: bump plugin version to ${{ steps.bump.outputs.version }}", 1, true),
+    "expected version bump commit")
+  assert(workflow:find('git push origin "HEAD:${{ github.event.pull_request.base.ref }}"', 1, true),
+    "expected version bump pushed to merged base branch")
 end
 
 test_tdd_mapping_exists()
@@ -1120,7 +1138,7 @@ test_clear_session_removes_stored_uuid()
 test_clear_session_notifies_when_nothing_to_clear()
 test_readme_guides_user_from_purpose_to_installation_and_keymaps()
 test_repository_has_no_superpowers_docs()
-test_ci_pipeline_runs_plugin_tests()
+test_ci_pipeline_tests_and_bumps_version_after_merged_pr()
 
 vim.notify = real.notify
 vim.defer_fn = real.defer_fn

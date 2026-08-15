@@ -3,10 +3,11 @@ name: CI
 on:
   push:
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
@@ -28,3 +29,61 @@ jobs:
 
       - name: Run tests
         run: nvim --headless -u NONE -l tests/test_tdd_bot.lua
+
+  bump-version:
+    name: Bump plugin version
+    needs: test
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    concurrency:
+      group: bump-plugin-version-${{ github.event.pull_request.base.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out merged base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Bump patch version
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version_file="lua/tdd-bot/init.lua"
+          version_lines="$(grep -E '^local VERSION = "(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"$' "$version_file" || true)"
+          if [[ "$(printf '%s\n' "$version_lines" | sed '/^$/d' | wc -l)" -ne 1 ]]; then
+            echo "Expected exactly one numeric semantic version declaration in $version_file." >&2
+            exit 1
+          fi
+
+          version="${version_lines#local VERSION = \"}"
+          version="${version%\"}"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid plugin version: $version" >&2
+            exit 1
+          fi
+
+          IFS=. read -r major minor patch <<< "$version"
+          next_version="${major}.${minor}.$((10#$patch + 1))"
+          version_pattern="${version//./\\.}"
+          sed -i "s/^local VERSION = \"${version_pattern}\"$/local VERSION = \"${next_version}\"/" "$version_file"
+
+          if ! grep -Fxq "local VERSION = \"$next_version\"" "$version_file"; then
+            echo "Failed to update plugin version." >&2
+            exit 1
+          fi
+          if git diff --quiet -- "$version_file"; then
+            echo "Plugin version did not change." >&2
+            exit 1
+          fi
+
+          echo "version=$next_version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lua/tdd-bot/init.lua
+          git commit -m "chore: bump plugin version to ${{ steps.bump.outputs.version }}"
+          git push origin "HEAD:${{ github.event.pull_request.base.ref }}"
