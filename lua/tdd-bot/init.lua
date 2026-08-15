@@ -24,6 +24,59 @@ local last_failure = nil
 local copilot_job_id = nil
 local loop_running = false
 local session_ids = {}
+local status_bufnr = nil
+local status_winid = nil
+local status_state = nil
+
+local status_highlights = {
+  red = "TddBotStatusRed",
+  green = "TddBotStatusGreen",
+  blue = "TddBotStatusBlue",
+}
+
+local function status_window_config()
+  return {
+    relative = "editor",
+    width = 1,
+    height = 1,
+    col = math.max(vim.o.columns - 3, 0),
+    row = 1,
+    style = "minimal",
+    focusable = false,
+    zindex = 50,
+  }
+end
+
+local function set_status(state_name)
+  local highlight = status_highlights[state_name]
+  if not highlight then
+    return
+  end
+
+  vim.api.nvim_set_hl(0, "TddBotStatusRed", { fg = "#ff0000" })
+  vim.api.nvim_set_hl(0, "TddBotStatusGreen", { fg = "#00cc44" })
+  vim.api.nvim_set_hl(0, "TddBotStatusBlue", { fg = "#3399ff" })
+
+  if not status_bufnr or not vim.api.nvim_buf_is_valid(status_bufnr) then
+    status_bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("buftype", "nofile", { buf = status_bufnr })
+    vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = status_bufnr })
+    vim.api.nvim_set_option_value("swapfile", false, { buf = status_bufnr })
+  end
+
+  vim.api.nvim_buf_set_lines(status_bufnr, 0, -1, false, { "●" })
+  vim.api.nvim_buf_clear_namespace(status_bufnr, -1, 0, -1)
+  vim.api.nvim_buf_add_highlight(status_bufnr, -1, highlight, 0, 0, -1)
+
+  local window_config = status_window_config()
+  if status_winid and vim.api.nvim_win_is_valid(status_winid) then
+    vim.api.nvim_win_set_config(status_winid, window_config)
+  else
+    status_winid = vim.api.nvim_open_win(status_bufnr, false, window_config)
+  end
+
+  status_state = state_name
+end
 
 local function now_ms()
   return (vim.uv or vim.loop).now()
@@ -492,9 +545,11 @@ local function run_fix_cycle(file_path, attempt)
     end
     if not failure then
       loop_running = false
+      set_status("green")
       notify_info(string.format("All tests passing. (%d passed, %d failed)", passed, failed))
       return
     end
+    set_status("red")
     if attempt >= config.max_retries then
       loop_running = false
       notify_error(string.format(
@@ -520,6 +575,7 @@ end
 local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   if index > #refactorings then
     loop_running = false
+    set_status("green")
     notify_info(string.format("Refactor loop complete. Applied %d refactoring(s).", #refactorings))
     return
   end
@@ -542,6 +598,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
       local passed = counts and counts.passed or 0
       local failed = counts and counts.failed or 0
       if failure then
+        set_status("red")
         revert_to_snapshot(file_path, bufnr, pre_lines)
         loop_running = false
         notify_error(string.format(
@@ -597,6 +654,7 @@ function M.run_refactor()
     local failed = counts and counts.failed or 0
     if failure then
       loop_running = false
+      set_status("red")
       notify_error(string.format(
         "Refactoring aborted: tests are red, can only refactor in a green state. (%d passed, %d failed)\nFailing test: %s\nOutput: %s",
         passed, failed, tostring(failure.test_id), tostring(failure.message)))
@@ -605,6 +663,7 @@ function M.run_refactor()
     notify_info(string.format(
       "Tests passing (%d passed). Starting refactor loop (%d refactoring(s)) (tdd-bot v%s).",
       passed, #refactorings, VERSION))
+    set_status("blue")
     run_refactor_cycle(file_path, bufnr, refactorings, 1)
   end)
 end

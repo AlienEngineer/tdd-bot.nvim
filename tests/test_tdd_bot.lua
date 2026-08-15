@@ -11,7 +11,14 @@ local state = {
   lines_by_buf = {},
   popup_calls = {},
   popup_buffers = {},
+  status_calls = {},
+  highlights = {},
+  buffer_highlights = {},
   buffer_options = {},
+  valid_buffers = {},
+  valid_windows = {},
+  next_buffer = 1000,
+  next_window = 2000,
   -- mtime per path: bumped to simulate copilot changing a file
   mtimes = {},
   open_bufs = {},
@@ -34,6 +41,12 @@ local real = {
   nvim_buf_get_lines = vim.api.nvim_buf_get_lines,
   nvim_create_buf = vim.api.nvim_create_buf,
   nvim_open_win = vim.api.nvim_open_win,
+  nvim_buf_is_valid = vim.api.nvim_buf_is_valid,
+  nvim_win_is_valid = vim.api.nvim_win_is_valid,
+  nvim_win_set_config = vim.api.nvim_win_set_config,
+  nvim_set_hl = vim.api.nvim_set_hl,
+  nvim_buf_clear_namespace = vim.api.nvim_buf_clear_namespace,
+  nvim_buf_add_highlight = vim.api.nvim_buf_add_highlight,
   nvim_set_option_value = vim.api.nvim_set_option_value,
   readfile = vim.fn.readfile,
   writefile = vim.fn.writefile,
@@ -99,13 +112,50 @@ vim.api.nvim_buf_get_lines = function(bufnr, _, _, _)
 end
 
 vim.api.nvim_create_buf = function(_, _)
-  return 1000 + #state.popup_buffers
+  local buf = state.next_buffer
+  state.next_buffer = state.next_buffer + 1
+  state.valid_buffers[buf] = true
+  return buf
 end
 
 vim.api.nvim_open_win = function(buf, enter, opts)
-  state.popup_buffers[buf] = state.lines_by_buf[buf] or {}
-  table.insert(state.popup_calls, { buf = buf, enter = enter, opts = opts })
-  return #state.popup_calls
+  local win = state.next_window
+  state.next_window = state.next_window + 1
+  state.valid_windows[win] = true
+  if opts.title then
+    state.popup_buffers[buf] = state.lines_by_buf[buf] or {}
+    table.insert(state.popup_calls, { buf = buf, enter = enter, opts = opts, win = win })
+  else
+    table.insert(state.status_calls, { buf = buf, enter = enter, opts = opts, win = win })
+  end
+  return win
+end
+
+vim.api.nvim_buf_is_valid = function(buf)
+  return state.valid_buffers[buf] == true
+end
+
+vim.api.nvim_win_is_valid = function(win)
+  return state.valid_windows[win] == true
+end
+
+vim.api.nvim_win_set_config = function(win, opts)
+  for _, call in ipairs(state.status_calls) do
+    if call.win == win then
+      call.opts = opts
+      return
+    end
+  end
+end
+
+vim.api.nvim_set_hl = function(_, name, opts)
+  state.highlights[name] = opts
+end
+
+vim.api.nvim_buf_clear_namespace = function() end
+
+vim.api.nvim_buf_add_highlight = function(buf, _, highlight)
+  state.buffer_highlights[buf] = highlight
 end
 
 vim.api.nvim_set_option_value = function(name, value, opts)
@@ -180,7 +230,14 @@ local function reset_state()
   state.lines_by_buf = {}
   state.popup_calls = {}
   state.popup_buffers = {}
+  state.status_calls = {}
+  state.highlights = {}
+  state.buffer_highlights = {}
   state.buffer_options = {}
+  state.valid_buffers = {}
+  state.valid_windows = {}
+  state.next_buffer = 1000
+  state.next_window = 2000
   state.mtimes = {}
   state.open_bufs = {}
   state.buf_lines = {}
@@ -351,6 +408,45 @@ local function test_passing_run_completes_loop()
 
   assert(#state.run_calls == 1, "expected one test run")
   assert(not bot._is_running(), "expected passing test run to complete TDD loop")
+end
+
+local function test_status_dot_reflects_confirmed_tdd_results()
+  reset_state()
+  neotest_mode = "fail-results"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  assert(#state.status_calls == 1, "expected one persistent status window")
+  local status = state.status_calls[1]
+  assert(not status.enter and not status.opts.focusable, "expected status window not to take focus")
+  assert(status.opts.width == 1 and status.opts.height == 1 and status.opts.relative == "editor",
+    "expected compact floating status window")
+  assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected red status dot highlight")
+
+  neotest_mode = "pass"
+  state.job_calls[1].opts.on_exit(1, 0)
+  assert(#state.status_calls == 1, "expected green update to reuse status window")
+  assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen", "expected green status dot highlight")
+end
+
+local function test_status_dot_recovers_after_manual_close()
+  reset_state()
+  neotest_mode = "fail-results"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local first = state.status_calls[1]
+  state.valid_windows[first.win] = false
+  neotest_mode = "pass"
+  state.job_calls[1].opts.on_exit(1, 0)
+
+  assert(#state.status_calls == 2, "expected closed status window to be recreated")
+  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusGreen",
+    "expected recreated status window to show current green state")
 end
 
 local function test_failure_in_any_adapter_beats_passing_adapter()
@@ -921,6 +1017,35 @@ local function test_refactor_starts_copilot_job_per_comment()
   assert(found_complete, "expected completion notification mentioning number of refactorings applied")
 end
 
+local function test_refactor_status_transitions_from_blue_to_red_or_green()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  state.buf_lines[current_buf] = { "// Refactoring: extract a helper" }
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  local status = state.status_calls[1]
+  assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue status dot highlight")
+
+  neotest_mode = "fail-results"
+  state.job_calls[1].opts.on_exit(1, 0)
+  assert(state.buffer_highlights[status.buf] == "TddBotStatusRed",
+    "expected broken refactoring verification to show red status")
+
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  state.buf_lines[current_buf] = { "// Refactoring: extract a helper" }
+  bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+  state.job_calls[1].opts.on_exit(1, 0)
+  assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusGreen",
+    "expected completed refactoring to show green status")
+end
+
 local function test_refactor_no_comments_found()
   reset_state()
   neotest_mode = "pass"
@@ -1061,6 +1186,7 @@ local function test_readme_guides_user_from_purpose_to_installation_and_keymaps(
   assert(readme:find("<leader>tdd", 1, true), "expected run-tests keymap")
   assert(readme:find("<leader>tdc", 1, true), "expected clear-session keymap")
   assert(readme:find("<leader>tdr", 1, true), "expected refactor keymap")
+  assert(readme:find("floating dot", 1, true), "expected TDD status indicator documentation")
 end
 
 local function test_repository_has_no_superpowers_docs()
@@ -1103,6 +1229,8 @@ test_failing_run_starts_background_copilot()
 test_start_notifies_implementing()
 test_tdd_loop_start_notifies_plugin_version()
 test_passing_run_completes_loop()
+test_status_dot_reflects_confirmed_tdd_results()
+test_status_dot_recovers_after_manual_close()
 test_failure_in_any_adapter_beats_passing_adapter()
 test_stale_failure_from_prior_run_is_ignored()
 test_buffer_lines_synced_from_disk_on_exit()
@@ -1131,6 +1259,7 @@ test_get_session_id_returns_nil_when_unset()
 test_tdc_mapping_exists()
 test_tdr_mapping_exists()
 test_refactor_starts_copilot_job_per_comment()
+test_refactor_status_transitions_from_blue_to_red_or_green()
 test_refactor_no_comments_found()
 test_refactor_aborts_when_tests_red()
 test_refactor_reverts_when_refactoring_breaks_tests()
@@ -1152,6 +1281,12 @@ vim.api.nvim_buf_is_loaded = real.nvim_buf_is_loaded
 vim.api.nvim_buf_get_lines = real.nvim_buf_get_lines
 vim.api.nvim_create_buf = real.nvim_create_buf
 vim.api.nvim_open_win = real.nvim_open_win
+vim.api.nvim_buf_is_valid = real.nvim_buf_is_valid
+vim.api.nvim_win_is_valid = real.nvim_win_is_valid
+vim.api.nvim_win_set_config = real.nvim_win_set_config
+vim.api.nvim_set_hl = real.nvim_set_hl
+vim.api.nvim_buf_clear_namespace = real.nvim_buf_clear_namespace
+vim.api.nvim_buf_add_highlight = real.nvim_buf_add_highlight
 vim.api.nvim_set_option_value = real.nvim_set_option_value
 vim.fn.readfile = real.readfile
 vim.fn.writefile = real.writefile
