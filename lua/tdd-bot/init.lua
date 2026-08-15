@@ -156,7 +156,7 @@ local function notify_terminal_failure(message)
   vim.notify("[tdd-bot] " .. message, vim.log.levels.ERROR)
 end
 
-local function show_applied_changes(path, diff)
+local function show_applied_changes(path, diff, work_label)
   local lines = vim.split(diff, "\n", { plain = true })
   if #lines == 0 then
     lines = { "Copilot changed this file." }
@@ -180,7 +180,7 @@ local function show_applied_changes(path, diff)
     row = math.floor((vim.o.lines - height) / 2),
     style = "minimal",
     border = "rounded",
-    title = " tdd-bot: Applied changes to " .. vim.fn.fnamemodify(path, ":t") .. " ",
+    title = " tdd-bot: " .. work_label .. " - Applied changes to " .. vim.fn.fnamemodify(path, ":t") .. " ",
     title_pos = "center",
   })
 
@@ -199,7 +199,7 @@ local function file_mtime(path)
   return stat and stat.mtime and stat.mtime.sec or 0
 end
 
-local function reload_changed_buffers(snapshots)
+local function reload_changed_buffers(snapshots, work_label)
   local changed = {}
   for path, snap in pairs(snapshots) do
     local new_mtime = file_mtime(path)
@@ -210,7 +210,7 @@ local function reload_changed_buffers(snapshots)
       local old_text = table.concat(snap.lines, "\n")
       local new_text = table.concat(new_lines, "\n")
       local diff = vim.diff(old_text, new_text, { result_type = "unified", ctxlen = 3 }) or ""
-      show_applied_changes(path, diff)
+      show_applied_changes(path, diff, work_label)
     end
   end
   return changed
@@ -510,6 +510,7 @@ local function run_copilot_job(context, prompt, on_done)
     return
   end
 
+  local work_label = context.test_id or context.text or "current work"
   local snapshots = snapshot_open_buffers()
   local cwd = find_project_root(context.file_path)
   local job_id = vim.fn.jobstart(build_copilot_cmd(context, prompt), {
@@ -518,7 +519,7 @@ local function run_copilot_job(context, prompt, on_done)
     stderr_buffered = false,
     on_exit = function(_, code)
       copilot_job_id = nil
-      reload_changed_buffers(snapshots)
+      reload_changed_buffers(snapshots, work_label)
       on_done(true)
     end,
   })
