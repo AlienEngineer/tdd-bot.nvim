@@ -9,7 +9,6 @@ local config = {
   refactor_keymap = "<leader>tdr",
   result_timeout_ms = 120000,
   poll_interval_ms = 200,
-  notification_timeout_ms = 3000,
   max_retries = 5,
   copilot_cmd = {
     "copilot",
@@ -78,6 +77,16 @@ local function set_status(state_name)
   status_state = state_name
 end
 
+local activity_window = nil
+local activity_generation = 0
+local activity_color_index = 1
+
+local activity_highlights = {
+  "TddBotActivityRed",
+  "TddBotActivityGreen",
+  "TddBotActivityBlue",
+}
+
 local function now_ms()
   return (vim.uv or vim.loop).now()
 end
@@ -102,11 +111,63 @@ local function get_or_create_session_id(file_path)
   return uuid
 end
 
-local function notify_info(message)
-  vim.notify("[tdd-bot] " .. message, vim.log.levels.INFO, { timeout = config.notification_timeout_ms })
+local function activity_border()
+  local highlight = activity_highlights[activity_color_index]
+  return {
+    { "+", highlight }, { "-", highlight }, { "+", highlight }, { "|", highlight },
+    { "+", highlight }, { "-", highlight }, { "+", highlight }, { "|", highlight },
+  }
 end
 
-local function notify_error(message)
+local function activity_window_config()
+  return {
+    relative = "editor",
+    width = 2,
+    height = 1,
+    col = math.max(0, vim.o.columns - 5),
+    row = math.max(0, vim.o.lines - 4),
+    style = "minimal",
+    focusable = false,
+    border = activity_border(),
+  }
+end
+
+local function stop_activity()
+  activity_generation = activity_generation + 1
+  if activity_window and vim.api.nvim_win_is_valid(activity_window) then
+    vim.api.nvim_win_close(activity_window, true)
+  end
+  activity_window = nil
+end
+
+local function start_activity()
+  if activity_window and vim.api.nvim_win_is_valid(activity_window) then
+    return
+  end
+
+  vim.api.nvim_set_hl(0, "TddBotActivityRed", { fg = "#ff5555" })
+  vim.api.nvim_set_hl(0, "TddBotActivityGreen", { fg = "#50fa7b" })
+  vim.api.nvim_set_hl(0, "TddBotActivityBlue", { fg = "#8be9fd" })
+  activity_color_index = 1
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+  activity_window = vim.api.nvim_open_win(buf, false, activity_window_config())
+  activity_generation = activity_generation + 1
+  local generation = activity_generation
+
+  local function pulse()
+    if generation ~= activity_generation or not activity_window or not vim.api.nvim_win_is_valid(activity_window) then
+      return
+    end
+    activity_color_index = (activity_color_index % #activity_highlights) + 1
+    vim.api.nvim_win_set_config(activity_window, activity_window_config())
+    vim.defer_fn(pulse, 500)
+  end
+
+  vim.defer_fn(pulse, 500)
+end
+
+local function notify_terminal_failure(message)
   vim.notify("[tdd-bot] " .. message, vim.log.levels.ERROR)
 end
 
@@ -201,8 +262,6 @@ local function build_copilot_prompt(context)
   return table.concat({
     "Fix the failing test with minimal code changes.",
     "Apply the fix directly to the file using your tools.",
-    "When you can't solve the failing test, audit the issue and provide a detailed report with what went wrong.",
-    "End an unresolved-test report with the exact marker `TDD_BOT_REPORT:` followed by the report.",
     "File: " .. context.file_path,
     "Test: " .. context.test_id,
     "Failure output:",
@@ -234,16 +293,6 @@ local function find_refactoring_comments(bufnr)
     end
   end
   return refactorings
-end
-
-local function unresolved_report(output)
-  local marker_start, marker_end = output:find("TDD_BOT_REPORT:%s*")
-  if not marker_start then
-    return nil
-  end
-
-  local report = output:sub(marker_end + 1):gsub("^%s+", ""):gsub("%s+$", "")
-  return report ~= "" and report or "Copilot marked this test unresolved without a report."
 end
 
 local function build_copilot_cmd(context, prompt)
@@ -346,7 +395,6 @@ end
 local function capture_failure_for_file(file_path, done)
   local ok, neotest = pcall(require, "neotest")
   if not ok then
-    notify_error("neotest not found.")
     done(nil)
     return
   end
@@ -458,58 +506,33 @@ local function capture_failure_for_file(file_path, done)
   vim.defer_fn(inspect_results, config.poll_interval_ms)
 end
 
-local function run_copilot_job(context, prompt, start_message, done_label, on_done)
+local function run_copilot_job(context, prompt, on_done)
   if vim.fn.executable("copilot") ~= 1 then
-    notify_error("copilot binary not found.")
     on_done(false)
     return
   end
   if copilot_job_id then
-    notify_error("copilot job already running.")
     on_done(false)
     return
   end
 
-  notify_info(start_message)
-
-  local job_started_at = now_ms()
   local snapshots = snapshot_open_buffers()
   local cwd = find_project_root(context.file_path)
-  local accumulated_out = {}
-  local accumulated_err = {}
-  copilot_job_id = vim.fn.jobstart(build_copilot_cmd(context, prompt), {
+  local job_id = vim.fn.jobstart(build_copilot_cmd(context, prompt), {
     cwd = cwd,
     stdout_buffered = false,
     stderr_buffered = false,
-    on_stdout = function(_, data)
-      for _, line in ipairs(data or {}) do
-        if line and line ~= "" then
-          accumulated_out[#accumulated_out + 1] = line
-        end
-      end
-    end,
-    on_stderr = function(_, data)
-      for _, line in ipairs(data or {}) do
-        if line and line ~= "" then
-          accumulated_err[#accumulated_err + 1] = line
-        end
-      end
-    end,
     on_exit = function(_, code)
       copilot_job_id = nil
-      if code ~= 0 and #accumulated_err > 0 then
-        notify_error("copilot error (code " .. code .. "): " .. table.concat(accumulated_err, " | "):sub(1, 200))
-      end
-      local report = unresolved_report(table.concat(accumulated_out, "\n"))
-      if report then
-        vim.notify("[tdd-bot] Copilot unresolved-test report:\n" .. report, vim.log.levels.WARN)
-      end
-      local elapsed_seconds = (now_ms() - job_started_at) / 1000
-      notify_info(string.format("%s took %.1fs", done_label, elapsed_seconds))
       reload_changed_buffers(snapshots)
       on_done(true)
     end,
   })
+  if job_id <= 0 then
+    on_done(false)
+    return
+  end
+  copilot_job_id = job_id
 end
 
 local function start_copilot_background(failure, on_done)
@@ -517,8 +540,6 @@ local function start_copilot_background(failure, on_done)
   run_copilot_job(
     failure,
     prompt,
-    "Implementing fix for " .. vim.fn.fnamemodify(failure.file_path, ":t") .. " ...",
-    "Copilot fix",
     on_done)
 end
 
@@ -527,8 +548,6 @@ local function start_copilot_refactor(refactor, on_done)
   run_copilot_job(
     refactor,
     prompt,
-    string.format("Applying refactoring for %s: %s", vim.fn.fnamemodify(refactor.file_path, ":t"), refactor.text),
-    "Copilot refactor",
     on_done)
 end
 
@@ -536,23 +555,17 @@ local function run_fix_cycle(file_path, attempt)
   capture_failure_for_file(file_path, function(failure, counts)
     local passed = counts and counts.passed or 0
     local failed = counts and counts.failed or 0
-    if failed > 0 and failure then
-      notify_info(string.format(
-        "Test run result: %d passed, %d failed.\nFailing test: %s\nOutput: %s",
-        passed, failed, tostring(failure.test_id), tostring(failure.message)))
-    else
-      notify_info(string.format("Test run result: %d passed, %d failed.", passed, failed))
-    end
     if not failure then
       loop_running = false
       set_status("green")
-      notify_info(string.format("All tests passing. (%d passed, %d failed)", passed, failed))
+      stop_activity()
       return
     end
     set_status("red")
     if attempt >= config.max_retries then
       loop_running = false
-      notify_error(string.format(
+      stop_activity()
+      notify_terminal_failure(string.format(
         "Max retries exhausted. Giving up. (%d passed, %d failed)\nLast failure (%s): %s",
         passed, failed, tostring(failure.test_id), tostring(failure.message)))
       return
@@ -562,6 +575,7 @@ local function run_fix_cycle(file_path, attempt)
         run_fix_cycle(file_path, attempt + 1)
       else
         loop_running = false
+        stop_activity()
       end
     end)
   end)
@@ -576,7 +590,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   if index > #refactorings then
     loop_running = false
     set_status("green")
-    notify_info(string.format("Refactor loop complete. Applied %d refactoring(s).", #refactorings))
+    stop_activity()
     return
   end
 
@@ -590,20 +604,16 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   }, function(launched)
     if not launched then
       loop_running = false
+      stop_activity()
       return
     end
 
-    notify_info(string.format("Verifying tests after refactoring %d/%d...", index, #refactorings))
     capture_failure_for_file(file_path, function(failure, counts)
-      local passed = counts and counts.passed or 0
-      local failed = counts and counts.failed or 0
       if failure then
         set_status("red")
         revert_to_snapshot(file_path, bufnr, pre_lines)
         loop_running = false
-        notify_error(string.format(
-          "Refactoring %d/%d broke tests, reverted to previous state. (%d passed, %d failed)\nRefactoring: %s\nFailing test: %s\nOutput: %s",
-          index, #refactorings, passed, failed, refactor.text, tostring(failure.test_id), tostring(failure.message)))
+        stop_activity()
         return
       end
       run_refactor_cycle(file_path, bufnr, refactorings, index + 1)
@@ -614,55 +624,43 @@ end
 function M.run_tdd()
   local file_path = vim.api.nvim_buf_get_name(0)
   if file_path == nil or file_path == "" then
-    notify_error("current buffer has no file path.")
     return
   end
 
   if loop_running or copilot_job_id then
-    notify_error("TDD loop already running.")
     return
   end
 
   loop_running = true
-  notify_info("Starting TDD loop (tdd-bot v" .. VERSION .. ").")
+  start_activity()
   run_fix_cycle(file_path, 0)
 end
 
 function M.run_refactor()
   local file_path = vim.api.nvim_buf_get_name(0)
   if file_path == nil or file_path == "" then
-    notify_error("current buffer has no file path.")
     return
   end
 
   if loop_running or copilot_job_id then
-    notify_error("TDD loop already running.")
     return
   end
 
   local refactorings = find_refactoring_comments(vim.api.nvim_get_current_buf())
   if #refactorings == 0 then
-    notify_info("No refactoring comments found (expected `// Refactoring: <what to do>`).")
     return
   end
 
   local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
-  notify_info("Checking tests are passing before starting refactor loop...")
+  start_activity()
   capture_failure_for_file(file_path, function(failure, counts)
-    local passed = counts and counts.passed or 0
-    local failed = counts and counts.failed or 0
     if failure then
       loop_running = false
       set_status("red")
-      notify_error(string.format(
-        "Refactoring aborted: tests are red, can only refactor in a green state. (%d passed, %d failed)\nFailing test: %s\nOutput: %s",
-        passed, failed, tostring(failure.test_id), tostring(failure.message)))
+      stop_activity()
       return
     end
-    notify_info(string.format(
-      "Tests passing (%d passed). Starting refactor loop (%d refactoring(s)) (tdd-bot v%s).",
-      passed, #refactorings, VERSION))
     set_status("blue")
     run_refactor_cycle(file_path, bufnr, refactorings, 1)
   end)
@@ -671,15 +669,11 @@ end
 function M.clear_session()
   local file_path = vim.api.nvim_buf_get_name(0)
   if file_path == nil or file_path == "" then
-    notify_error("current buffer has no file path.")
     return
   end
 
   if session_ids[file_path] then
     session_ids[file_path] = nil
-    notify_info("Cleared stored session for " .. vim.fn.fnamemodify(file_path, ":t") .. ". Next run starts fresh.")
-  else
-    notify_info("No stored session for " .. vim.fn.fnamemodify(file_path, ":t") .. "; nothing to clear.")
   end
 end
 
@@ -699,9 +693,6 @@ function M.setup(opts)
     end
     if type(opts.poll_interval_ms) == "number" and opts.poll_interval_ms > 0 then
       config.poll_interval_ms = math.floor(opts.poll_interval_ms)
-    end
-    if type(opts.notification_timeout_ms) == "number" and opts.notification_timeout_ms >= 0 then
-      config.notification_timeout_ms = math.floor(opts.notification_timeout_ms)
     end
     if type(opts.max_retries) == "number" and opts.max_retries >= 0 then
       config.max_retries = math.floor(opts.max_retries)
