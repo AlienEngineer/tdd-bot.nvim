@@ -1016,6 +1016,27 @@ local function test_clear_session_notifies_when_nothing_to_clear()
   assert(found, "expected a notify when clearing with no stored session")
 end
 
+local function test_readme_guides_user_from_purpose_to_installation_and_keymaps()
+  local file = assert(io.open("README.md", "r"))
+  local readme = file:read("*a")
+  file:close()
+
+  local description = assert(readme:find("keeps a test%-driven development loop", 1, false),
+    "expected README to describe plugin purpose")
+  local installation = assert(readme:find("## Install with LazyVim", 1, true),
+    "expected LazyVim installation section")
+  local usage = assert(readme:find("## Use tdd%-bot", 1, false),
+    "expected usage section")
+
+  assert(description < installation and installation < usage,
+    "expected README order: description, LazyVim installation, usage")
+  assert(readme:find('"AlienEngineer/tdd%-bot%.nvim"', 1, false),
+    "expected LazyVim plugin specification")
+  assert(readme:find("<leader>tdd", 1, true), "expected run-tests keymap")
+  assert(readme:find("<leader>tdc", 1, true), "expected clear-session keymap")
+  assert(readme:find("<leader>tdr", 1, true), "expected refactor keymap")
+end
+
 local function test_repository_has_no_superpowers_docs()
   assert(vim.fn.isdirectory("docs/superpowers") == 0, "expected no superpowers documentation in repository")
 end
@@ -1058,6 +1079,7 @@ test_refactor_aborts_when_tests_red()
 test_refactor_reverts_when_refactoring_breaks_tests()
 test_clear_session_removes_stored_uuid()
 test_clear_session_notifies_when_nothing_to_clear()
+test_readme_guides_user_from_purpose_to_installation_and_keymaps()
 test_repository_has_no_superpowers_docs()
 
 vim.notify = real.notify
