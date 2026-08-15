@@ -2,8 +2,8 @@
 
 `tdd-bot.nvim` keeps a test-driven development loop inside Neovim. It runs the
 current file's tests through [neotest](https://github.com/nvim-neotest/neotest);
-when they fail, it asks the Copilot CLI to fix them in a background job, streams
-the job output to a bottom log buffer, and reruns the tests when Copilot exits.
+when they fail, it asks the Copilot CLI to fix them in a background job and
+reruns the tests when Copilot exits.
 It also supports Copilot-assisted refactoring that starts only when tests pass.
 
 [![CI](https://github.com/AlienEngineer/tdd-bot.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/AlienEngineer/tdd-bot.nvim/actions/workflows/ci.yml)
@@ -11,17 +11,13 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 ## Features
 
 - `<leader>tdd` runs tests for current file with `neotest`
-- each TDD loop start notifies current tdd-bot version
-- every test run (pass or fail, each retry) notifies total passed/failed counts
-- when failures exist, notifies the failing test id and its failure output
+- shows a compact non-focusable activity window whose border pulses red, green,
+  and blue while tests or Copilot work is running
 - ignores stale pass/fail state left over from a prior run until the current run is confirmed underway (guards against neotest's cumulative results cache misreporting)
 - on failure, runs Copilot non-interactive fix in background, resuming the same Copilot session for that file across retries/reruns (per-file, in-memory only, not persisted across Neovim restarts)
 - when retries are exhausted, notifies with the last failing test's message so you know why Copilot couldn't fix it
-- when Copilot marks a test unresolved, shows its detailed audit report in a Neovim warning notification
-- streams Copilot output to dedicated bottom log buffer
 - reruns tests once automatically after Copilot exits
 - on exit, syncs any buffer Copilot changed with its on-disk content (via `nvim_buf_set_lines`, not `:edit!`, so `FileType`/`BufReadPost` autocmds — and any LSP client attached through them — aren't re-triggered) and opens a popup with a unified diff of what changed
-- notifies fix duration on exit, e.g. "Copilot fix took 3.2s"
 - `<leader>tdc` clears the stored Copilot session for the current file, so the next `<leader>tdd` on it starts fresh
 - `<leader>tdr` scans the current buffer for `// Refactoring: <what to do>` comments and applies each one via a background Copilot job, one at a time; Copilot is instructed to remove the comment once the refactoring is applied
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
@@ -64,11 +60,11 @@ leader key.
 
 1. Open test file.
 2. Press `<leader>tdd`.
-3. If tests fail, read Copilot output in bottom log buffer.
+3. Watch activity window while Copilot works.
 4. tdd-bot syncs Copilot's changed buffers and reruns tests after Copilot exits.
 
-Each TDD loop reports tdd-bot version, passed/failed counts, failing test details,
-and fix duration. If retries finish without a fix, it reports last failure. Use
+Activity window pulses while work is in progress. If every retry fails, tdd-bot
+shows one notification with passed/failed totals and final test failure. Use
 `<leader>tdc` when you need Copilot to forget earlier work for current file.
 The status dot stays visible in the top-right corner and changes only after a
 test or refactor state has been confirmed.
@@ -96,7 +92,6 @@ require("tdd-bot").setup({
   copilot_cmd = { "copilot", "--allow-all-tools", "--allow-all-urls" },
   result_timeout_ms = 120000,
   poll_interval_ms = 200,
-  notification_timeout_ms = 3000,
   max_retries = 5,
 })
 ```

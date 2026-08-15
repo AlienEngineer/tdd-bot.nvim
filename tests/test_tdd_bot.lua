@@ -8,6 +8,7 @@ local state = {
   job_calls = {},
   qflist = {},
   copilot_exists = true,
+  jobstart_result = nil,
   lines_by_buf = {},
   popup_calls = {},
   popup_buffers = {},
@@ -19,6 +20,10 @@ local state = {
   valid_windows = {},
   next_buffer = 1000,
   next_window = 2000,
+  window_calls = {},
+  window_configs = {},
+  closed_windows = {},
+  deferred_activity = {},
   -- mtime per path: bumped to simulate copilot changing a file
   mtimes = {},
   open_bufs = {},
@@ -44,6 +49,7 @@ local real = {
   nvim_buf_is_valid = vim.api.nvim_buf_is_valid,
   nvim_win_is_valid = vim.api.nvim_win_is_valid,
   nvim_win_set_config = vim.api.nvim_win_set_config,
+  nvim_win_close = vim.api.nvim_win_close,
   nvim_set_hl = vim.api.nvim_set_hl,
   nvim_buf_clear_namespace = vim.api.nvim_buf_clear_namespace,
   nvim_buf_add_highlight = vim.api.nvim_buf_add_highlight,
@@ -65,8 +71,12 @@ vim.notify = function(msg, level, opts)
   table.insert(state.notify_calls, { msg = msg, level = level, opts = opts or {} })
 end
 
-vim.defer_fn = function(fn)
-  fn()
+vim.defer_fn = function(fn, delay)
+  if delay == 500 then
+    table.insert(state.deferred_activity, fn)
+  else
+    fn()
+  end
 end
 
 vim.cmd = function(cmd)
@@ -122,10 +132,12 @@ vim.api.nvim_open_win = function(buf, enter, opts)
   local win = state.next_window
   state.next_window = state.next_window + 1
   state.valid_windows[win] = true
+  state.window_configs[win] = opts
+  table.insert(state.window_calls, { buf = buf, enter = enter, opts = opts, win = win })
   if opts.title then
     state.popup_buffers[buf] = state.lines_by_buf[buf] or {}
     table.insert(state.popup_calls, { buf = buf, enter = enter, opts = opts, win = win })
-  else
+  elseif not opts.border then
     table.insert(state.status_calls, { buf = buf, enter = enter, opts = opts, win = win })
   end
   return win
@@ -140,12 +152,18 @@ vim.api.nvim_win_is_valid = function(win)
 end
 
 vim.api.nvim_win_set_config = function(win, opts)
+  state.window_configs[win] = opts
   for _, call in ipairs(state.status_calls) do
     if call.win == win then
       call.opts = opts
       return
     end
   end
+end
+
+vim.api.nvim_win_close = function(win, _)
+  state.valid_windows[win] = false
+  table.insert(state.closed_windows, win)
 end
 
 vim.api.nvim_set_hl = function(_, name, opts)
@@ -201,7 +219,7 @@ end
 
 vim.fn.jobstart = function(cmd, opts)
   table.insert(state.job_calls, { cmd = cmd, opts = opts or {} })
-  return #state.job_calls
+  return state.jobstart_result or #state.job_calls
 end
 
 vim.uv = vim.uv or {}
@@ -227,6 +245,7 @@ local function reset_state()
   state.job_calls = {}
   state.qflist = {}
   state.copilot_exists = true
+  state.jobstart_result = nil
   state.lines_by_buf = {}
   state.popup_calls = {}
   state.popup_buffers = {}
@@ -238,6 +257,10 @@ local function reset_state()
   state.valid_windows = {}
   state.next_buffer = 1000
   state.next_window = 2000
+  state.window_calls = {}
+  state.window_configs = {}
+  state.closed_windows = {}
+  state.deferred_activity = {}
   state.mtimes = {}
   state.open_bufs = {}
   state.buf_lines = {}
@@ -322,6 +345,20 @@ local function mapped_handler(lhs)
   return nil
 end
 
+local function activity_windows()
+  local windows = {}
+  for _, win in ipairs(state.window_calls) do
+    if win.enter == false and win.opts.border then
+      windows[#windows + 1] = win
+    end
+  end
+  return windows
+end
+
+local function border_highlight(config)
+  return config.border[1][2]
+end
+
 local function contains(list, value)
   for _, item in ipairs(list) do
     if item == value then
@@ -370,17 +407,27 @@ local function test_failing_run_starts_background_copilot()
   end
   assert(type(call.cmd[prompt_idx]) == "string" and call.cmd[prompt_idx]:find("Expected true got false", 1, true),
     "expected failure text in prompt")
-  assert(call.cmd[prompt_idx]:find("When you can't solve the failing test", 1, true),
-    "expected unresolved-test reporting instruction in prompt")
-  assert(call.cmd[prompt_idx]:find("TDD_BOT_REPORT:", 1, true),
-    "expected unresolved-test report marker in prompt")
   -- no log buffer should open
   for _, cmd in ipairs(state.commands) do
     assert(not cmd:match("botright"), "expected no bottom log buffer opened, got: " .. cmd)
   end
 end
 
-local function test_start_notifies_implementing()
+local function test_failed_copilot_launch_cleans_up_activity_hint()
+  reset_state()
+  neotest_mode = "fail-results"
+  state.jobstart_result = -1
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  assert(not bot._is_running(), "expected failed Copilot launch to stop TDD loop")
+  assert(#state.closed_windows == 1, "expected failed Copilot launch to close activity window")
+  assert(#state.notify_calls == 0, "expected failed Copilot launch to avoid notification")
+end
+
+local function test_running_loop_shows_pulsing_activity_hint()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
@@ -388,14 +435,19 @@ local function test_start_notifies_implementing()
   bot.setup()
   bot.run_tdd()
 
-  local found = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("Implementing", 1, true) or n.msg:find("implementing", 1, true) or n.msg:find("started", 1, true) then
-      found = true
-      assert(n.opts.timeout == 3000, "expected transient start notification")
-    end
-  end
-  assert(found, "expected start notification")
+  local windows = activity_windows()
+  assert(#windows == 1, "expected one activity window")
+  assert(not windows[1].enter and windows[1].opts.focusable == false, "expected non-focusable activity window")
+  assert(border_highlight(windows[1].opts) == "TddBotActivityRed", "expected red initial border")
+  assert(state.highlights.TddBotActivityRed.fg == "#ff5555", "expected red activity highlight")
+  assert(state.highlights.TddBotActivityGreen.fg == "#50fa7b", "expected green activity highlight")
+  assert(state.highlights.TddBotActivityBlue.fg == "#8be9fd", "expected blue activity highlight")
+
+  table.remove(state.deferred_activity, 1)()
+  assert(border_highlight(state.window_configs[windows[1].win]) == "TddBotActivityGreen", "expected green pulse")
+  table.remove(state.deferred_activity, 1)()
+  assert(border_highlight(state.window_configs[windows[1].win]) == "TddBotActivityBlue", "expected blue pulse")
+  assert(#state.notify_calls == 0, "expected no progress notification")
 end
 
 local function test_passing_run_completes_loop()
@@ -408,6 +460,8 @@ local function test_passing_run_completes_loop()
 
   assert(#state.run_calls == 1, "expected one test run")
   assert(not bot._is_running(), "expected passing test run to complete TDD loop")
+  assert(#state.closed_windows == 1, "expected activity window closed after passing run")
+  assert(#state.notify_calls == 0, "expected passing run to avoid notifications")
 end
 
 local function test_status_dot_reflects_confirmed_tdd_results()
@@ -470,30 +524,18 @@ local function test_stale_failure_from_prior_run_is_ignored()
 
   assert(#state.job_calls == 0,
     "expected stale failure from a previous, unrelated run to be ignored; got " .. tostring(#state.job_calls) .. " job(s)")
-  local found_pass = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("All tests passing", 1, true) then
-      found_pass = true
-    end
-  end
-  assert(found_pass, "expected dirty/stale first-poll failure to resolve to a passing notification")
+  assert(#state.notify_calls == 0, "expected stale failure recovery to avoid notifications")
 end
 
-local function test_tdd_loop_start_notifies_plugin_version()
+local function test_tdd_loop_exposes_plugin_version()
   reset_state()
   install_neotest()
   local bot = load_bot()
   bot.setup()
   bot.run_tdd()
 
-  local found_version = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg == "[tdd-bot] Starting TDD loop (tdd-bot v0.1.13)." then
-      found_version = true
-    end
-  end
-  assert(found_version, "expected TDD loop start notification with plugin version")
   assert(bot.version == "0.1.13", "expected public plugin version")
+  assert(#state.notify_calls == 0, "expected loop start to avoid notifications")
 end
 
 local function test_buffer_lines_synced_from_disk_on_exit()
@@ -613,7 +655,7 @@ local function test_no_notify_when_mtime_unchanged()
   end
 end
 
-local function test_notify_includes_fix_duration_on_exit()
+local function test_copilot_exit_avoids_progress_notification()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
@@ -625,16 +667,10 @@ local function test_notify_includes_fix_duration_on_exit()
   neotest_mode = "pass"
   call.opts.on_exit(1, 0)
 
-  local found_duration = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("took", 1, true) and n.msg:match("%d+%.%d+s") then
-      found_duration = true
-    end
-  end
-  assert(found_duration, "expected a notification reporting fix duration in Ns format")
+  assert(#state.notify_calls == 0, "expected Copilot exit to avoid progress notification")
 end
 
-local function test_unresolved_copilot_report_is_notified()
+local function test_unresolved_copilot_report_avoids_notification()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
@@ -643,24 +679,10 @@ local function test_unresolved_copilot_report_is_notified()
   bot.run_tdd()
 
   local call = state.job_calls[1]
-  call.opts.on_stdout(1, {
-    "TDD_BOT_REPORT:",
-    "Root cause: expected value is stale.",
-    "No safe fix found without changing product behavior.",
-  })
   neotest_mode = "pass"
   call.opts.on_exit(1, 0)
 
-  local found_report = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.level == vim.log.levels.WARN
-      and n.msg:find("Copilot unresolved%-test report", nil, false)
-      and n.msg:find("Root cause: expected value is stale.", 1, true)
-      and n.msg:find("No safe fix found without changing product behavior.", 1, true) then
-      found_report = true
-    end
-  end
-  assert(found_report, "expected Copilot unresolved-test report notification")
+  assert(#state.notify_calls == 0, "expected unresolved report to avoid notification")
 end
 
 local function test_rerun_after_copilot_exit()
@@ -707,16 +729,10 @@ local function test_retry_loop_stops_when_passing()
   call1.opts.on_exit(1, 0)
 
   assert(#state.job_calls == 1, "expected no second job when passing. got " .. tostring(#state.job_calls))
-  local found_done = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("passing", 1, true) or n.msg:find("Done", 1, true) or n.msg:find("done", 1, true) then
-      found_done = true
-    end
-  end
-  assert(found_done, "expected final passing notification")
+  assert(#state.notify_calls == 0, "expected final passing run to avoid notifications")
 end
 
-local function test_every_run_notifies_pass_fail_counts()
+local function test_failing_run_avoids_progress_notification()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
@@ -724,51 +740,7 @@ local function test_every_run_notifies_pass_fail_counts()
   bot.setup({ max_retries = 3 })
   bot.run_tdd()
 
-  local found_result_counts = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("Test run result", 1, true) and n.msg:match("%d+ passed") and n.msg:match("%d+ failed") then
-      found_result_counts = true
-    end
-  end
-  assert(found_result_counts, "expected per-run notification with passed/failed counts even on first failing run")
-end
-
-local function test_failing_run_notification_includes_test_id_and_output()
-  reset_state()
-  neotest_mode = "fail-results"
-  install_neotest()
-  local bot = load_bot()
-  bot.setup({ max_retries = 3 })
-  bot.run_tdd()
-
-  local found = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("Test run result", 1, true)
-      and n.msg:find("Failing test:", 1, true)
-      and n.msg:find("sample::failing", 1, true)
-      and n.msg:find("Output:", 1, true)
-      and n.msg:find("Expected true got false", 1, true) then
-      found = true
-    end
-  end
-  assert(found, "expected failing-run notification to include failing test id and its output")
-end
-
-local function test_passing_notification_includes_counts()
-  reset_state()
-  neotest_mode = "pass"
-  install_neotest()
-  local bot = load_bot()
-  bot.setup()
-  bot.run_tdd()
-
-  local found_counts = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("passed", 1, true) and n.msg:find("failed", 1, true) and n.msg:match("%d+ passed") and n.msg:match("%d+ failed") then
-      found_counts = true
-    end
-  end
-  assert(found_counts, "expected passing notification to include passed/failed counts")
+  assert(#state.notify_calls == 0, "expected failing run to use activity hint instead of notification")
 end
 
 local function test_exhausted_notification_includes_counts()
@@ -783,13 +755,12 @@ local function test_exhausted_notification_includes_counts()
   neotest_mode = "fail-results"
   call1.opts.on_exit(1, 0)
 
-  local found_counts = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("exhausted", 1, true) and n.msg:match("%d+ passed") and n.msg:match("%d+ failed") then
-      found_counts = true
-    end
-  end
-  assert(found_counts, "expected exhausted notification to include passed/failed counts")
+  assert(#state.notify_calls == 1, "expected one terminal retry notification")
+  local message = state.notify_calls[1].msg
+  assert(message:find("exhausted", 1, true) and message:match("%d+ passed") and message:match("%d+ failed"),
+    "expected terminal retry notification to include counts")
+  assert(message:find("sample::failing", 1, true) and message:find("Expected true got false", 1, true),
+    "expected terminal retry notification to include final failure")
 end
 
 local function test_retry_loop_stops_at_max_retries()
@@ -1008,13 +979,8 @@ local function test_refactor_starts_copilot_job_per_comment()
   assert(#state.job_calls == 2, "expected no third job after all refactorings applied")
   assert(not bot._is_running(), "expected refactor loop to mark itself not running once complete")
 
-  local found_complete = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("Refactor loop complete", 1, true) and n.msg:find("2", 1, true) then
-      found_complete = true
-    end
-  end
-  assert(found_complete, "expected completion notification mentioning number of refactorings applied")
+  assert(#state.closed_windows == 1, "expected activity window closed after refactor completion")
+  assert(#state.notify_calls == 0, "expected refactor completion to avoid notifications")
 end
 
 local function test_refactor_status_transitions_from_blue_to_red_or_green()
@@ -1056,13 +1022,7 @@ local function test_refactor_no_comments_found()
   bot.run_refactor()
 
   assert(#state.job_calls == 0, "expected no job when no refactoring comments present")
-  local found = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("No refactoring comments found", 1, true) then
-      found = true
-    end
-  end
-  assert(found, "expected notification that no refactoring comments were found")
+  assert(#state.notify_calls == 0, "expected no-comment pre-check to avoid notifications")
 end
 
 local function test_refactor_aborts_when_tests_red()
@@ -1080,13 +1040,8 @@ local function test_refactor_aborts_when_tests_red()
   assert(#state.job_calls == 0, "expected no copilot job started when tests are red")
   assert(not bot._is_running(), "expected loop_running left false after aborting")
 
-  local found = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("aborted", 1, true) and n.msg:find("red", 1, true) then
-      found = true
-    end
-  end
-  assert(found, "expected notification explaining refactoring was aborted because tests are red")
+  assert(#state.closed_windows == 1, "expected activity window closed after red pre-check")
+  assert(#state.notify_calls == 0, "expected red pre-check to avoid notifications")
 end
 
 local function test_refactor_reverts_when_refactoring_breaks_tests()
@@ -1119,13 +1074,8 @@ local function test_refactor_reverts_when_refactoring_breaks_tests()
     assert(state.lines_by_buf[current_buf][i] == line, "expected buffer reverted to pre-refactoring content")
   end
 
-  local found = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("reverted to previous state", 1, true) then
-      found = true
-    end
-  end
-  assert(found, "expected notification that the broken refactoring was reverted")
+  assert(#state.closed_windows == 1, "expected activity window closed after reverting")
+  assert(#state.notify_calls == 0, "expected reverted refactor to avoid notifications")
 end
 
 local function test_clear_session_removes_stored_uuid()
@@ -1151,20 +1101,14 @@ local function test_clear_session_removes_stored_uuid()
   assert(uuid_after ~= nil and uuid_after ~= uuid_before, "expected fresh uuid after clear + rerun")
 end
 
-local function test_clear_session_notifies_when_nothing_to_clear()
+local function test_clear_session_avoids_notification_when_nothing_to_clear()
   reset_state()
   install_neotest()
   local bot = load_bot()
   bot.setup()
   bot.clear_session()
 
-  local found = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("[Nn]o.*session", nil, false) or n.msg:find("[Nn]othing to clear", nil, false) then
-      found = true
-    end
-  end
-  assert(found, "expected a notify when clearing with no stored session")
+  assert(#state.notify_calls == 0, "expected session clearing to avoid notifications")
 end
 
 local function test_readme_guides_user_from_purpose_to_installation_and_keymaps()
@@ -1226,8 +1170,9 @@ end
 
 test_tdd_mapping_exists()
 test_failing_run_starts_background_copilot()
-test_start_notifies_implementing()
-test_tdd_loop_start_notifies_plugin_version()
+test_failed_copilot_launch_cleans_up_activity_hint()
+test_running_loop_shows_pulsing_activity_hint()
+test_tdd_loop_exposes_plugin_version()
 test_passing_run_completes_loop()
 test_status_dot_reflects_confirmed_tdd_results()
 test_status_dot_recovers_after_manual_close()
@@ -1238,14 +1183,12 @@ test_no_reload_when_mtime_unchanged()
 test_applied_changes_open_in_diff_popup()
 test_applied_changes_do_not_use_notification()
 test_no_notify_when_mtime_unchanged()
-test_notify_includes_fix_duration_on_exit()
-test_unresolved_copilot_report_is_notified()
+test_copilot_exit_avoids_progress_notification()
+test_unresolved_copilot_report_avoids_notification()
 test_rerun_after_copilot_exit()
 test_retry_loop_fires_second_copilot_on_still_failing()
 test_retry_loop_stops_when_passing()
-test_every_run_notifies_pass_fail_counts()
-test_failing_run_notification_includes_test_id_and_output()
-test_passing_notification_includes_counts()
+test_failing_run_avoids_progress_notification()
 test_exhausted_notification_includes_counts()
 test_retry_loop_stops_at_max_retries()
 test_fallback_quickfix_failure_used()
@@ -1264,7 +1207,7 @@ test_refactor_no_comments_found()
 test_refactor_aborts_when_tests_red()
 test_refactor_reverts_when_refactoring_breaks_tests()
 test_clear_session_removes_stored_uuid()
-test_clear_session_notifies_when_nothing_to_clear()
+test_clear_session_avoids_notification_when_nothing_to_clear()
 test_readme_guides_user_from_purpose_to_installation_and_keymaps()
 test_repository_has_no_superpowers_docs()
 test_ci_pipeline_tests_and_bumps_version_after_merged_pr()
@@ -1284,6 +1227,7 @@ vim.api.nvim_open_win = real.nvim_open_win
 vim.api.nvim_buf_is_valid = real.nvim_buf_is_valid
 vim.api.nvim_win_is_valid = real.nvim_win_is_valid
 vim.api.nvim_win_set_config = real.nvim_win_set_config
+vim.api.nvim_win_close = real.nvim_win_close
 vim.api.nvim_set_hl = real.nvim_set_hl
 vim.api.nvim_buf_clear_namespace = real.nvim_buf_clear_namespace
 vim.api.nvim_buf_add_highlight = real.nvim_buf_add_highlight
