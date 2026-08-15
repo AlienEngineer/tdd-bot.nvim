@@ -33,12 +33,13 @@ local status_highlights = {
   blue = "TddBotStatusBlue",
 }
 
-local function status_window_config()
+local function status_window_config(text)
+  local width = vim.fn.strdisplaywidth(text)
   return {
     relative = "editor",
-    width = 1,
+    width = width,
     height = 1,
-    col = math.max(vim.o.columns - 3, 0),
+    col = math.max(vim.o.columns - width - 2, 0),
     row = 1,
     style = "minimal",
     focusable = false,
@@ -46,10 +47,14 @@ local function status_window_config()
   }
 end
 
-local function set_status(state_name)
+local function set_status(state_name, pending_refactorings)
   local highlight = status_highlights[state_name]
   if not highlight then
     return
+  end
+  local text = "●"
+  if state_name == "blue" and type(pending_refactorings) == "number" and pending_refactorings > 0 then
+    text = string.format("● %d", pending_refactorings)
   end
 
   vim.api.nvim_set_hl(0, "TddBotStatusRed", { fg = "#ff0000" })
@@ -63,11 +68,11 @@ local function set_status(state_name)
     vim.api.nvim_set_option_value("swapfile", false, { buf = status_bufnr })
   end
 
-  vim.api.nvim_buf_set_lines(status_bufnr, 0, -1, false, { "●" })
+  vim.api.nvim_buf_set_lines(status_bufnr, 0, -1, false, { text })
   vim.api.nvim_buf_clear_namespace(status_bufnr, -1, 0, -1)
   vim.api.nvim_buf_add_highlight(status_bufnr, -1, highlight, 0, 0, -1)
 
-  local window_config = status_window_config()
+  local window_config = status_window_config(text)
   if status_winid and vim.api.nvim_win_is_valid(status_winid) then
     vim.api.nvim_win_set_config(status_winid, window_config)
   else
@@ -616,6 +621,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
         stop_activity()
         return
       end
+      set_status("blue", #refactorings - index)
       run_refactor_cycle(file_path, bufnr, refactorings, index + 1)
     end)
   end)
@@ -648,6 +654,7 @@ function M.run_refactor()
 
   local refactorings = find_refactoring_comments(vim.api.nvim_get_current_buf())
   if #refactorings == 0 then
+    vim.notify("No refactoring found. Add a // Refactoring: <request> comment to start a refactoring.", vim.log.levels.INFO)
     return
   end
 
@@ -661,7 +668,7 @@ function M.run_refactor()
       stop_activity()
       return
     end
-    set_status("blue")
+    set_status("blue", #refactorings)
     run_refactor_cycle(file_path, bufnr, refactorings, 1)
   end)
 end

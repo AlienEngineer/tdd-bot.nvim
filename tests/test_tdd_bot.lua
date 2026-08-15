@@ -963,6 +963,9 @@ local function test_refactor_starts_copilot_job_per_comment()
   bot.run_refactor()
 
   assert(#state.job_calls == 1, "expected first refactoring to start a job")
+  local status = state.status_calls[1]
+  assert(state.lines_by_buf[status.buf][1] == "● 2", "expected blue status to show all pending refactorings")
+  assert(status.opts.width == 3, "expected status window sized for pending refactoring count")
   local prompt = arg_after(state.job_calls[1].cmd, "-p")
   assert(prompt:find("extract this into a helper function", 1, true), "expected first refactoring text in prompt")
   assert(prompt:find("Line: 2", 1, true), "expected line number of first refactoring comment in prompt")
@@ -970,6 +973,7 @@ local function test_refactor_starts_copilot_job_per_comment()
   -- finish first job, should launch the second
   state.job_calls[1].opts.on_exit(1, 0)
   assert(#state.job_calls == 2, "expected second refactoring to start a job after first completes")
+  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to decrease after verified refactoring")
   local prompt2 = arg_after(state.job_calls[2].cmd, "-p")
   assert(prompt2:find("rename y to total", 1, true), "expected second refactoring text in prompt")
   assert(prompt2:find("Line: 4", 1, true), "expected line number of second refactoring comment in prompt")
@@ -978,6 +982,9 @@ local function test_refactor_starts_copilot_job_per_comment()
   state.job_calls[2].opts.on_exit(1, 0)
   assert(#state.job_calls == 2, "expected no third job after all refactorings applied")
   assert(not bot._is_running(), "expected refactor loop to mark itself not running once complete")
+  assert(state.lines_by_buf[status.buf][1] == "●", "expected completed refactoring queue to hide zero count")
+  assert(status.opts.width == 1, "expected completed refactoring status window to shrink to dot")
+  assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen", "expected completed refactoring status to be green")
 
   assert(#state.closed_windows == 1, "expected activity window closed after refactor completion")
   assert(#state.notify_calls == 0, "expected refactor completion to avoid notifications")
@@ -994,11 +1001,13 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
 
   local status = state.status_calls[1]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue status dot highlight")
+  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to show one pending refactoring")
 
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed",
     "expected broken refactoring verification to show red status")
+  assert(state.lines_by_buf[status.buf][1] == "●", "expected failed refactoring status to hide pending count")
 
   reset_state()
   neotest_mode = "pass"
@@ -1010,6 +1019,8 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
   state.job_calls[1].opts.on_exit(1, 0)
   assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusGreen",
     "expected completed refactoring to show green status")
+  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "●",
+    "expected completed refactoring status to hide pending count")
 end
 
 local function test_refactor_no_comments_found()
@@ -1022,7 +1033,12 @@ local function test_refactor_no_comments_found()
   bot.run_refactor()
 
   assert(#state.job_calls == 0, "expected no job when no refactoring comments present")
-  assert(#state.notify_calls == 0, "expected no-comment pre-check to avoid notifications")
+  assert(#state.status_calls == 0, "expected no status display when no refactoring comments present")
+  assert(#state.notify_calls == 1, "expected no-comment pre-check notification")
+  assert(state.notify_calls[1].msg:find("No refactoring found", 1, true),
+    "expected no-comment notification to explain no refactoring was found")
+  assert(state.notify_calls[1].msg:find("// Refactoring: <request>", 1, true),
+    "expected no-comment notification to show refactoring comment format")
 end
 
 local function test_refactor_aborts_when_tests_red()
@@ -1060,6 +1076,8 @@ local function test_refactor_reverts_when_refactoring_breaks_tests()
   bot.run_refactor()
 
   assert(#state.job_calls == 1, "expected first refactoring job to start once tests confirmed green")
+  local status = state.status_calls[1]
+  assert(state.lines_by_buf[status.buf][1] == "● 2", "expected both refactorings in initial pending count")
 
   -- first refactoring breaks the tests
   neotest_mode = "fail-results"
@@ -1067,6 +1085,8 @@ local function test_refactor_reverts_when_refactoring_breaks_tests()
 
   assert(#state.job_calls == 1, "expected loop to stop, no second refactoring job started")
   assert(not bot._is_running(), "expected refactor loop to stop running after a revert")
+  assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected failed refactoring to show red status")
+  assert(state.lines_by_buf[status.buf][1] == "●", "expected red status to hide remaining pending count")
 
   local path = "/tmp/sample_test.dart"
   for i, line in ipairs(pre_lines) do
