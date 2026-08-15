@@ -26,11 +26,14 @@ local session_ids = {}
 local status_bufnr = nil
 local status_winid = nil
 local status_state = nil
+local status_pulse_state = nil
+local status_pulse_bright = true
+local status_pulse_generation = 0
 
 local status_highlights = {
-  red = "TddBotStatusRed",
-  green = "TddBotStatusGreen",
-  blue = "TddBotStatusBlue",
+  red = { bright = "TddBotStatusRed", dim = "TddBotStatusRedDim" },
+  green = { bright = "TddBotStatusGreen", dim = "TddBotStatusGreenDim" },
+  blue = { bright = "TddBotStatusBlue", dim = "TddBotStatusBlueDim" },
 }
 
 local function status_window_config()
@@ -46,15 +49,18 @@ local function status_window_config()
   }
 end
 
-local function set_status(state_name)
-  local highlight = status_highlights[state_name]
-  if not highlight then
+local function render_status(state_name, bright)
+  local highlights = status_highlights[state_name]
+  if not highlights then
     return
   end
 
   vim.api.nvim_set_hl(0, "TddBotStatusRed", { fg = "#ff0000" })
+  vim.api.nvim_set_hl(0, "TddBotStatusRedDim", { fg = "#802222" })
   vim.api.nvim_set_hl(0, "TddBotStatusGreen", { fg = "#00cc44" })
+  vim.api.nvim_set_hl(0, "TddBotStatusGreenDim", { fg = "#287a40" })
   vim.api.nvim_set_hl(0, "TddBotStatusBlue", { fg = "#3399ff" })
+  vim.api.nvim_set_hl(0, "TddBotStatusBlueDim", { fg = "#285b8f" })
 
   if not status_bufnr or not vim.api.nvim_buf_is_valid(status_bufnr) then
     status_bufnr = vim.api.nvim_create_buf(false, true)
@@ -65,7 +71,7 @@ local function set_status(state_name)
 
   vim.api.nvim_buf_set_lines(status_bufnr, 0, -1, false, { "●" })
   vim.api.nvim_buf_clear_namespace(status_bufnr, -1, 0, -1)
-  vim.api.nvim_buf_add_highlight(status_bufnr, -1, highlight, 0, 0, -1)
+  vim.api.nvim_buf_add_highlight(status_bufnr, -1, bright and highlights.bright or highlights.dim, 0, 0, -1)
 
   local window_config = status_window_config()
   if status_winid and vim.api.nvim_win_is_valid(status_winid) then
@@ -77,15 +83,41 @@ local function set_status(state_name)
   status_state = state_name
 end
 
-local activity_window = nil
-local activity_generation = 0
-local activity_color_index = 1
+local function set_status(state_name)
+  if not status_highlights[state_name] then
+    return
+  end
+  status_pulse_generation = status_pulse_generation + 1
+  status_pulse_state = nil
+  status_pulse_bright = true
+  render_status(state_name, true)
+end
 
-local activity_highlights = {
-  "TddBotActivityRed",
-  "TddBotActivityGreen",
-  "TddBotActivityBlue",
-}
+local function start_status_pulse(state_name)
+  if not status_highlights[state_name] then
+    return
+  end
+  if status_pulse_state == state_name then
+    return
+  end
+
+  status_pulse_generation = status_pulse_generation + 1
+  status_pulse_state = state_name
+  status_pulse_bright = true
+  local generation = status_pulse_generation
+  render_status(state_name, true)
+
+  local function pulse()
+    if generation ~= status_pulse_generation or status_pulse_state ~= state_name then
+      return
+    end
+    status_pulse_bright = not status_pulse_bright
+    render_status(state_name, status_pulse_bright)
+    vim.defer_fn(pulse, 500)
+  end
+
+  vim.defer_fn(pulse, 500)
+end
 
 local function now_ms()
   return (vim.uv or vim.loop).now()
@@ -109,62 +141,6 @@ local function get_or_create_session_id(file_path)
   local uuid = generate_uuid()
   session_ids[file_path] = uuid
   return uuid
-end
-
-local function activity_border()
-  local highlight = activity_highlights[activity_color_index]
-  return {
-    { "+", highlight }, { "-", highlight }, { "+", highlight }, { "|", highlight },
-    { "+", highlight }, { "-", highlight }, { "+", highlight }, { "|", highlight },
-  }
-end
-
-local function activity_window_config()
-  return {
-    relative = "editor",
-    width = 2,
-    height = 1,
-    col = math.max(0, vim.o.columns - 5),
-    row = math.max(0, vim.o.lines - 4),
-    style = "minimal",
-    focusable = false,
-    border = activity_border(),
-  }
-end
-
-local function stop_activity()
-  activity_generation = activity_generation + 1
-  if activity_window and vim.api.nvim_win_is_valid(activity_window) then
-    vim.api.nvim_win_close(activity_window, true)
-  end
-  activity_window = nil
-end
-
-local function start_activity()
-  if activity_window and vim.api.nvim_win_is_valid(activity_window) then
-    return
-  end
-
-  vim.api.nvim_set_hl(0, "TddBotActivityRed", { fg = "#ff5555" })
-  vim.api.nvim_set_hl(0, "TddBotActivityGreen", { fg = "#50fa7b" })
-  vim.api.nvim_set_hl(0, "TddBotActivityBlue", { fg = "#8be9fd" })
-  activity_color_index = 1
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
-  activity_window = vim.api.nvim_open_win(buf, false, activity_window_config())
-  activity_generation = activity_generation + 1
-  local generation = activity_generation
-
-  local function pulse()
-    if generation ~= activity_generation or not activity_window or not vim.api.nvim_win_is_valid(activity_window) then
-      return
-    end
-    activity_color_index = (activity_color_index % #activity_highlights) + 1
-    vim.api.nvim_win_set_config(activity_window, activity_window_config())
-    vim.defer_fn(pulse, 500)
-  end
-
-  vim.defer_fn(pulse, 500)
 end
 
 local function notify_terminal_failure(message)
@@ -558,13 +534,12 @@ local function run_fix_cycle(file_path, attempt)
     if not failure then
       loop_running = false
       set_status("green")
-      stop_activity()
       return
     end
-    set_status("red")
+    start_status_pulse("red")
     if attempt >= config.max_retries then
       loop_running = false
-      stop_activity()
+      set_status("red")
       notify_terminal_failure(string.format(
         "Max retries exhausted. Giving up. (%d passed, %d failed)\nLast failure (%s): %s",
         passed, failed, tostring(failure.test_id), tostring(failure.message)))
@@ -575,7 +550,7 @@ local function run_fix_cycle(file_path, attempt)
         run_fix_cycle(file_path, attempt + 1)
       else
         loop_running = false
-        stop_activity()
+        set_status("red")
       end
     end)
   end)
@@ -590,7 +565,6 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   if index > #refactorings then
     loop_running = false
     set_status("green")
-    stop_activity()
     return
   end
 
@@ -604,7 +578,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   }, function(launched)
     if not launched then
       loop_running = false
-      stop_activity()
+      set_status("red")
       return
     end
 
@@ -613,7 +587,6 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
         set_status("red")
         revert_to_snapshot(file_path, bufnr, pre_lines)
         loop_running = false
-        stop_activity()
         return
       end
       run_refactor_cycle(file_path, bufnr, refactorings, index + 1)
@@ -632,7 +605,7 @@ function M.run_tdd()
   end
 
   loop_running = true
-  start_activity()
+  start_status_pulse("green")
   run_fix_cycle(file_path, 0)
 end
 
@@ -653,15 +626,13 @@ function M.run_refactor()
 
   local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
-  start_activity()
+  start_status_pulse("blue")
   capture_failure_for_file(file_path, function(failure, counts)
     if failure then
       loop_running = false
       set_status("red")
-      stop_activity()
       return
     end
-    set_status("blue")
     run_refactor_cycle(file_path, bufnr, refactorings, 1)
   end)
 end
