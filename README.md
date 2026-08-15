@@ -11,8 +11,8 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 ## Features
 
 - `<leader>tdd` runs tests for current file with `neotest`
-- shows a compact non-focusable activity window whose border pulses red, green,
-  and blue while tests or Copilot work is running
+- shows a compact non-focusable floating status dot that pulses while tests or
+  Copilot work is running
 - ignores stale pass/fail state left over from a prior run until the current run is confirmed underway (guards against neotest's cumulative results cache misreporting)
 - on failure, runs Copilot non-interactive fix in background, resuming the same Copilot session for that file across retries/reruns (per-file, in-memory only, not persisted across Neovim restarts)
 - when retries are exhausted, notifies with the last failing test's message so you know why Copilot couldn't fix it
@@ -22,7 +22,10 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - `<leader>tdr` scans the current buffer for `// Refactoring: <what to do>` comments and applies each one via a background Copilot job, one at a time; Copilot is instructed to remove the comment once the refactoring is applied
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
 - after each refactoring, tests rerun; a broken refactoring reverts the file (disk + buffer) to its pre-refactoring content and stops the loop
-- a compact, non-focusable floating dot shows confirmed TDD state: red for failing tests, green for passing tests, and blue with the remaining refactoring count while refactoring runs from a green baseline; count decreases after each verified refactoring and hides when complete
+- a compact, non-focusable floating dot pulses green while TDD tests run, red
+  during failure recovery, and blue during refactoring; blue shows remaining
+  refactoring count, which decreases after each verified refactoring and hides
+  when complete; completed loops leave a static green or red dot
 
 ## Install with LazyVim
 
@@ -60,14 +63,15 @@ leader key.
 
 1. Open test file.
 2. Press `<leader>tdd`.
-3. Watch activity window while Copilot works.
+3. Watch status dot pulse while Copilot works.
 4. tdd-bot syncs Copilot's changed buffers and reruns tests after Copilot exits.
 
-Activity window pulses while work is in progress. If every retry fails, tdd-bot
-shows one notification with passed/failed totals and final test failure. Use
-`<leader>tdc` when you need Copilot to forget earlier work for current file.
-The status dot stays visible in the top-right corner and changes only after a
-test or refactor state has been confirmed.
+Status dot stays visible in top-right corner. It pulses green while a TDD test
+run waits for a result, red while fixing failures, and blue while refactoring.
+When work ends it becomes static green for success or static red for failure.
+If every retry fails, tdd-bot shows one notification with passed/failed totals
+and final test failure. Use `<leader>tdc` when you need Copilot to forget
+earlier work for current file.
 
 ### Refactor passing code
 
