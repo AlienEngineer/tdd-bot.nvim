@@ -1,4 +1,4 @@
-package.path = "./tdd-bot/lua/?.lua;./tdd-bot/lua/?/init.lua;" .. package.path
+package.path = "./lua/?.lua;./lua/?/init.lua;" .. package.path
 
 local state = {
   mapped = {},
