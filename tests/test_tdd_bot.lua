@@ -9,6 +9,9 @@ local state = {
   qflist = {},
   copilot_exists = true,
   lines_by_buf = {},
+  popup_calls = {},
+  popup_buffers = {},
+  buffer_options = {},
   -- mtime per path: bumped to simulate copilot changing a file
   mtimes = {},
   open_bufs = {},
@@ -29,6 +32,9 @@ local real = {
   nvim_list_bufs = vim.api.nvim_list_bufs,
   nvim_buf_is_loaded = vim.api.nvim_buf_is_loaded,
   nvim_buf_get_lines = vim.api.nvim_buf_get_lines,
+  nvim_create_buf = vim.api.nvim_create_buf,
+  nvim_open_win = vim.api.nvim_open_win,
+  nvim_set_option_value = vim.api.nvim_set_option_value,
   readfile = vim.fn.readfile,
   writefile = vim.fn.writefile,
   executable = vim.fn.executable,
@@ -90,6 +96,21 @@ end
 
 vim.api.nvim_buf_get_lines = function(bufnr, _, _, _)
   return state.buf_lines[bufnr] or {}
+end
+
+vim.api.nvim_create_buf = function(_, _)
+  return 1000 + #state.popup_buffers
+end
+
+vim.api.nvim_open_win = function(buf, enter, opts)
+  state.popup_buffers[buf] = state.lines_by_buf[buf] or {}
+  table.insert(state.popup_calls, { buf = buf, enter = enter, opts = opts })
+  return #state.popup_calls
+end
+
+vim.api.nvim_set_option_value = function(name, value, opts)
+  state.buffer_options[opts.buf] = state.buffer_options[opts.buf] or {}
+  state.buffer_options[opts.buf][name] = value
 end
 
 vim.fn.readfile = function(path)
@@ -157,6 +178,9 @@ local function reset_state()
   state.qflist = {}
   state.copilot_exists = true
   state.lines_by_buf = {}
+  state.popup_calls = {}
+  state.popup_buffers = {}
+  state.buffer_options = {}
   state.mtimes = {}
   state.open_bufs = {}
   state.buf_lines = {}
@@ -416,9 +440,10 @@ local function test_no_reload_when_mtime_unchanged()
   call.opts.on_exit(1, 0)
 
   assert(state.lines_by_buf[current_buf] == nil, "expected no buffer sync when mtime unchanged")
+  assert(#state.popup_calls == 0, "expected no popup when Copilot makes no changes")
 end
 
-local function test_notification_includes_diff_content()
+local function test_applied_changes_open_in_diff_popup()
   reset_state()
   neotest_mode = "fail-results"
   state.mtimes["/tmp/sample_test.dart"] = 1000
@@ -435,18 +460,21 @@ local function test_notification_includes_diff_content()
   neotest_mode = "pass"
   call.opts.on_exit(1, 0)
 
-  local found_diff = false
-  for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("sample_test.dart", 1, true)
-      and n.msg:find("-line2", 1, true)
-      and n.msg:find("+line2 changed", 1, true) then
-      found_diff = true
-    end
-  end
-  assert(found_diff, "expected notification to include unified diff of changes")
+  assert(#state.popup_calls == 1, "expected changed file to open one popup")
+  local popup = state.popup_calls[1]
+  assert(popup.enter, "expected popup to receive focus")
+  assert(popup.opts.title:find("sample_test.dart", 1, true), "expected popup title to name changed file")
+  assert(popup.opts.border == "rounded", "expected popup border")
+  assert(popup.opts.relative == "editor", "expected floating editor popup")
+  assert(popup.opts.style == "minimal", "expected minimal popup")
+  assert(popup.opts.width > 0 and popup.opts.height > 0, "expected visible popup dimensions")
+  local content = table.concat(state.popup_buffers[popup.buf], "\n")
+  assert(content:find("-line2", 1, true) and content:find("+line2 changed", 1, true),
+    "expected popup to show unified diff of Copilot changes")
+  assert(state.buffer_options[popup.buf].filetype == "diff", "expected diff syntax in popup")
 end
 
-local function test_notify_changed_file_when_mtime_differs()
+local function test_applied_changes_do_not_use_notification()
   reset_state()
   neotest_mode = "fail-results"
   -- seed mtime before copilot runs
@@ -462,13 +490,11 @@ local function test_notify_changed_file_when_mtime_differs()
   neotest_mode = "pass"
   call.opts.on_exit(1, 0)
 
-  local found_change = false
+  assert(#state.popup_calls == 1, "expected changed file to open a popup")
   for _, n in ipairs(state.notify_calls) do
-    if n.msg:find("sample_test.dart", 1, true) then
-      found_change = true
-    end
+    assert(not n.msg:find("Applied changes to", 1, true),
+      "expected applied changes to use popup instead of notification")
   end
-  assert(found_change, "expected per-file change notification when mtime changed")
 end
 
 local function test_no_notify_when_mtime_unchanged()
@@ -1063,8 +1089,8 @@ test_failure_in_any_adapter_beats_passing_adapter()
 test_stale_failure_from_prior_run_is_ignored()
 test_buffer_lines_synced_from_disk_on_exit()
 test_no_reload_when_mtime_unchanged()
-test_notification_includes_diff_content()
-test_notify_changed_file_when_mtime_differs()
+test_applied_changes_open_in_diff_popup()
+test_applied_changes_do_not_use_notification()
 test_no_notify_when_mtime_unchanged()
 test_notify_includes_fix_duration_on_exit()
 test_unresolved_copilot_report_is_notified()
@@ -1106,6 +1132,9 @@ vim.api.nvim_buf_set_lines = real.nvim_buf_set_lines
 vim.api.nvim_list_bufs = real.nvim_list_bufs
 vim.api.nvim_buf_is_loaded = real.nvim_buf_is_loaded
 vim.api.nvim_buf_get_lines = real.nvim_buf_get_lines
+vim.api.nvim_create_buf = real.nvim_create_buf
+vim.api.nvim_open_win = real.nvim_open_win
+vim.api.nvim_set_option_value = real.nvim_set_option_value
 vim.fn.readfile = real.readfile
 vim.fn.writefile = real.writefile
 vim.fn.executable = real.executable

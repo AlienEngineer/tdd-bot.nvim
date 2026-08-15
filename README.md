@@ -20,7 +20,7 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - when Copilot marks a test unresolved, shows its detailed audit report in a Neovim warning notification
 - streams Copilot output to dedicated bottom log buffer
 - reruns tests once automatically after Copilot exits
-- on exit, syncs any buffer Copilot changed with its on-disk content (via `nvim_buf_set_lines`, not `:edit!`, so `FileType`/`BufReadPost` autocmds — and any LSP client attached through them — aren't re-triggered) and notifies with a unified diff of what changed
+- on exit, syncs any buffer Copilot changed with its on-disk content (via `nvim_buf_set_lines`, not `:edit!`, so `FileType`/`BufReadPost` autocmds — and any LSP client attached through them — aren't re-triggered) and opens a popup with a unified diff of what changed
 - notifies fix duration on exit, e.g. "Copilot fix took 3.2s"
 - `<leader>tdc` clears the stored Copilot session for the current file, so the next `<leader>tdd` on it starts fresh
 - `<leader>tdr` scans the current buffer for `// Refactoring: <what to do>` comments and applies each one via a background Copilot job, one at a time; Copilot is instructed to remove the comment once the refactoring is applied
