@@ -579,6 +579,11 @@ local function revert_to_snapshot(file_path, bufnr, lines)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
 end
 
+local function reload_and_format_refactor()
+  vim.cmd("e!")
+  vim.cmd("w")
+end
+
 local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   if index > #refactorings then
     loop_running = false
@@ -600,6 +605,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
       return
     end
 
+    reload_and_format_refactor()
     capture_failure_for_file(file_path, function(failure, counts)
       if failure then
         set_status("red")

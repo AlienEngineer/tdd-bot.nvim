@@ -1006,6 +1006,8 @@ local function test_refactor_starts_copilot_job_per_comment()
 
   -- finish first job, should launch the second
   state.job_calls[1].opts.on_exit(1, 0)
+  assert(#state.commands == 2 and state.commands[1] == "e!" and state.commands[2] == "w",
+    "expected completed refactoring to reload from disk then write through formatter")
   assert(#state.job_calls == 2, "expected second refactoring to start a job after first completes")
   assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to decrease after verified refactoring")
   local prompt2 = arg_after(state.job_calls[2].cmd, "-p")
@@ -1014,6 +1016,8 @@ local function test_refactor_starts_copilot_job_per_comment()
 
   -- finish second job, loop should complete with no more jobs
   state.job_calls[2].opts.on_exit(1, 0)
+  assert(#state.commands == 4 and state.commands[3] == "e!" and state.commands[4] == "w",
+    "expected every completed refactoring to reload from disk then write through formatter")
   assert(#state.job_calls == 2, "expected no third job after all refactorings applied")
   assert(not bot._is_running(), "expected refactor loop to mark itself not running once complete")
   assert(state.lines_by_buf[status.buf][1] == "●", "expected completed refactoring queue to hide zero count")
