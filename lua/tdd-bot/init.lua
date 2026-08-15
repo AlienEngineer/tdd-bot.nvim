@@ -57,6 +57,35 @@ local function notify_error(message)
   vim.notify("[tdd-bot] " .. message, vim.log.levels.ERROR)
 end
 
+local function show_applied_changes(path, diff)
+  local lines = vim.split(diff, "\n", { plain = true })
+  if #lines == 0 then
+    lines = { "Copilot changed this file." }
+  end
+
+  local width = math.min(math.max(60, vim.fn.strdisplaywidth(lines[1])), math.floor(vim.o.columns * 0.8))
+  for _, line in ipairs(lines) do
+    width = math.min(math.max(width, vim.fn.strdisplaywidth(line)), math.floor(vim.o.columns * 0.8))
+  end
+  local height = math.min(#lines, math.floor(vim.o.lines * 0.7))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.api.nvim_set_option_value("filetype", "diff", { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+
+  vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    col = math.floor((vim.o.columns - width) / 2),
+    row = math.floor((vim.o.lines - height) / 2),
+    style = "minimal",
+    border = "rounded",
+    title = " tdd-bot: Applied changes to " .. vim.fn.fnamemodify(path, ":t") .. " ",
+    title_pos = "center",
+  })
+end
+
 local function file_mtime(path)
   local stat = (vim.uv or vim.loop).fs_stat(path)
   return stat and stat.mtime and stat.mtime.sec or 0
@@ -73,7 +102,7 @@ local function reload_changed_buffers(snapshots)
       local old_text = table.concat(snap.lines, "\n")
       local new_text = table.concat(new_lines, "\n")
       local diff = vim.diff(old_text, new_text, { result_type = "unified", ctxlen = 3 }) or ""
-      notify_info("Applied changes to " .. vim.fn.fnamemodify(path, ":t") .. ":\n" .. diff)
+      show_applied_changes(path, diff)
     end
   end
   return changed
