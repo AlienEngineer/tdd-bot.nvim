@@ -6,6 +6,27 @@ when they fail, it asks the Copilot CLI to fix them in a background job, streams
 the job output to a bottom log buffer, and reruns the tests when Copilot exits.
 It also supports Copilot-assisted refactoring that starts only when tests pass.
 
+[![CI](https://github.com/AlienEngineer/tdd-bot.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/AlienEngineer/tdd-bot.nvim/actions/workflows/ci.yml)
+
+## Features
+
+- `<leader>tdd` runs tests for current file with `neotest`
+- each TDD loop start notifies current tdd-bot version
+- every test run (pass or fail, each retry) notifies total passed/failed counts
+- when failures exist, notifies the failing test id and its failure output
+- ignores stale pass/fail state left over from a prior run until the current run is confirmed underway (guards against neotest's cumulative results cache misreporting)
+- on failure, runs Copilot non-interactive fix in background, resuming the same Copilot session for that file across retries/reruns (per-file, in-memory only, not persisted across Neovim restarts)
+- when retries are exhausted, notifies with the last failing test's message so you know why Copilot couldn't fix it
+- when Copilot marks a test unresolved, shows its detailed audit report in a Neovim warning notification
+- streams Copilot output to dedicated bottom log buffer
+- reruns tests once automatically after Copilot exits
+- on exit, syncs any buffer Copilot changed with its on-disk content (via `nvim_buf_set_lines`, not `:edit!`, so `FileType`/`BufReadPost` autocmds — and any LSP client attached through them — aren't re-triggered) and notifies with a unified diff of what changed
+- notifies fix duration on exit, e.g. "Copilot fix took 3.2s"
+- `<leader>tdc` clears the stored Copilot session for the current file, so the next `<leader>tdd` on it starts fresh
+- `<leader>tdr` scans the current buffer for `// Refactoring: <what to do>` comments and applies each one via a background Copilot job, one at a time; Copilot is instructed to remove the comment once the refactoring is applied
+- refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
+- after each refactoring, tests rerun; a broken refactoring reverts the file (disk + buffer) to its pre-refactoring content and stops the loop
+
 ## Install with LazyVim
 
 Create `~/.config/nvim/lua/plugins/tdd-bot.lua`:
