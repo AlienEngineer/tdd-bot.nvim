@@ -187,7 +187,7 @@ local function show_applied_changes(path, diff)
   vim.api.nvim_set_option_value("filetype", "diff", { buf = buf })
   vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
 
-  vim.api.nvim_open_win(buf, true, {
+  local win = vim.api.nvim_open_win(buf, true, {
     relative = "editor",
     width = width,
     height = height,
@@ -198,6 +198,15 @@ local function show_applied_changes(path, diff)
     title = " tdd-bot: Applied changes to " .. vim.fn.fnamemodify(path, ":t") .. " ",
     title_pos = "center",
   })
+
+  local function close_popup()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end
+
+  vim.keymap.set("n", "q", close_popup, { buffer = buf, silent = true })
+  vim.keymap.set("n", "<Esc>", close_popup, { buffer = buf, silent = true })
 end
 
 local function file_mtime(path)

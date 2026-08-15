@@ -793,6 +793,44 @@ local function test_retry_loop_stops_at_max_retries()
   assert(found_reason, "expected give-up notification to include the last failure reason")
 end
 
+local function test_applied_changes_popup_closes_with_q_or_escape()
+  local function open_popup()
+    reset_state()
+    neotest_mode = "fail-results"
+    state.mtimes["/tmp/sample_test.dart"] = 1000
+    state.buf_lines[current_buf] = { "line1" }
+    install_neotest()
+    local bot = load_bot()
+    bot.setup()
+    bot.run_tdd()
+
+    state.mtimes["/tmp/sample_test.dart"] = 2000
+    state.file_contents["/tmp/sample_test.dart"] = { "line2" }
+    neotest_mode = "pass"
+    state.job_calls[1].opts.on_exit(1, 0)
+
+    return state.popup_calls[1]
+  end
+
+  local function close_with(key)
+    local popup = open_popup()
+    local mapping
+    for _, candidate in ipairs(state.mapped) do
+      if candidate.lhs == key and candidate.opts.buffer == popup.buf then
+        mapping = candidate
+        break
+      end
+    end
+
+    assert(mapping, "expected popup mapping for " .. key)
+    mapping.rhs()
+    assert(not state.valid_windows[popup.win], "expected " .. key .. " to close changes popup")
+  end
+
+  close_with("q")
+  close_with("<Esc>")
+end
+
 local function test_fallback_quickfix_failure_used()
   reset_state()
   neotest_mode = "fail-qf"
@@ -1181,6 +1219,7 @@ test_stale_failure_from_prior_run_is_ignored()
 test_buffer_lines_synced_from_disk_on_exit()
 test_no_reload_when_mtime_unchanged()
 test_applied_changes_open_in_diff_popup()
+test_applied_changes_popup_closes_with_q_or_escape()
 test_applied_changes_do_not_use_notification()
 test_no_notify_when_mtime_unchanged()
 test_copilot_exit_avoids_progress_notification()
