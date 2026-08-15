@@ -26,6 +26,7 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - `<leader>tdr` scans the current buffer for `// Refactoring: <what to do>` comments and applies each one via a background Copilot job, one at a time; Copilot is instructed to remove the comment once the refactoring is applied
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
 - after each refactoring, tests rerun; a broken refactoring reverts the file (disk + buffer) to its pre-refactoring content and stops the loop
+- a compact, non-focusable floating dot shows confirmed TDD state: red for failing tests, green for passing tests, and blue while refactoring runs from a green baseline
 
 ## Install with LazyVim
 
@@ -69,6 +70,8 @@ leader key.
 Each TDD loop reports tdd-bot version, passed/failed counts, failing test details,
 and fix duration. If retries finish without a fix, it reports last failure. Use
 `<leader>tdc` when you need Copilot to forget earlier work for current file.
+The status dot stays visible in the top-right corner and changes only after a
+test or refactor state has been confirmed.
 
 ### Refactor passing code
 
