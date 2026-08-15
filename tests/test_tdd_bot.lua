@@ -597,6 +597,7 @@ local function test_applied_changes_open_in_diff_popup()
   assert(#state.popup_calls == 1, "expected changed file to open one popup")
   local popup = state.popup_calls[1]
   assert(popup.enter, "expected popup to receive focus")
+  assert(popup.opts.title:find("sample::failing", 1, true), "expected popup title to name failing test")
   assert(popup.opts.title:find("sample_test.dart", 1, true), "expected popup title to name changed file")
   assert(popup.opts.border == "rounded", "expected popup border")
   assert(popup.opts.relative == "editor", "expected floating editor popup")
@@ -606,6 +607,34 @@ local function test_applied_changes_open_in_diff_popup()
   assert(content:find("-line2", 1, true) and content:find("+line2 changed", 1, true),
     "expected popup to show unified diff of Copilot changes")
   assert(state.buffer_options[popup.buf].filetype == "diff", "expected diff syntax in popup")
+end
+
+local function test_refactor_applied_changes_name_refactoring_in_popup()
+  reset_state()
+  neotest_mode = "pass"
+  state.mtimes["/tmp/sample_test.dart"] = 1000
+  state.buf_lines[current_buf] = {
+    "local value = 1",
+    "// Refactoring: extract value calculation",
+  }
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  local call = state.job_calls[1]
+  state.mtimes["/tmp/sample_test.dart"] = 2000
+  state.file_contents["/tmp/sample_test.dart"] = {
+    "local function value() return 1 end",
+  }
+  call.opts.on_exit(1, 0)
+
+  assert(#state.popup_calls == 1, "expected changed refactoring file to open one popup")
+  local popup = state.popup_calls[1]
+  assert(popup.opts.title:find("extract value calculation", 1, true),
+    "expected popup title to name refactoring")
+  assert(popup.opts.title:find("sample_test.dart", 1, true),
+    "expected popup title to name changed file")
 end
 
 local function test_applied_changes_do_not_use_notification()
@@ -1218,6 +1247,7 @@ test_buffer_lines_synced_from_disk_on_exit()
 test_no_reload_when_mtime_unchanged()
 test_applied_changes_open_in_diff_popup()
 test_applied_changes_popup_closes_with_q_or_escape()
+test_refactor_applied_changes_name_refactoring_in_popup()
 test_applied_changes_do_not_use_notification()
 test_no_notify_when_mtime_unchanged()
 test_copilot_exit_avoids_progress_notification()
