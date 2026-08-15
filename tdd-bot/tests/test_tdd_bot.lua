@@ -1016,6 +1016,10 @@ local function test_clear_session_notifies_when_nothing_to_clear()
   assert(found, "expected a notify when clearing with no stored session")
 end
 
+local function test_repository_has_no_superpowers_docs()
+  assert(vim.fn.isdirectory("docs/superpowers") == 0, "expected no superpowers documentation in repository")
+end
+
 test_tdd_mapping_exists()
 test_failing_run_starts_background_copilot()
 test_start_notifies_implementing()
@@ -1054,6 +1058,7 @@ test_refactor_aborts_when_tests_red()
 test_refactor_reverts_when_refactoring_breaks_tests()
 test_clear_session_removes_stored_uuid()
 test_clear_session_notifies_when_nothing_to_clear()
+test_repository_has_no_superpowers_docs()
 
 vim.notify = real.notify
 vim.defer_fn = real.defer_fn
