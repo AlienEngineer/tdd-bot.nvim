@@ -1041,6 +1041,19 @@ local function test_repository_has_no_superpowers_docs()
   assert(vim.fn.isdirectory("docs/superpowers") == 0, "expected no superpowers documentation in repository")
 end
 
+local function test_ci_pipeline_runs_plugin_tests()
+  local file = assert(io.open(".github/workflows/ci.yml", "r"), "expected CI workflow")
+  local workflow = file:read("*a")
+  file:close()
+
+  assert(workflow:find("pull_request:", 1, true), "expected CI to run for pull requests")
+  assert(workflow:find("push:", 1, true), "expected CI to run for pushes")
+  assert(workflow:find("workflow_dispatch:", 1, true), "expected CI to support manual runs")
+  assert(workflow:find("contents: read", 1, true), "expected CI to use read-only repository permission")
+  assert(workflow:find("nvim --headless -u NONE -l tests/test_tdd_bot.lua", 1, true),
+    "expected CI to run plugin behavior tests")
+end
+
 test_tdd_mapping_exists()
 test_failing_run_starts_background_copilot()
 test_start_notifies_implementing()
@@ -1081,6 +1094,7 @@ test_clear_session_removes_stored_uuid()
 test_clear_session_notifies_when_nothing_to_clear()
 test_readme_guides_user_from_purpose_to_installation_and_keymaps()
 test_repository_has_no_superpowers_docs()
+test_ci_pipeline_runs_plugin_tests()
 
 vim.notify = real.notify
 vim.defer_fn = real.defer_fn

@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test plugin behavior
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Neovim
+        env:
+          NEOVIM_VERSION: v0.11.5
+        run: |
+          curl --fail --location --retry 3 \
+            --output nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NEOVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          tar --extract --gzip --file nvim.tar.gz
+          echo "$PWD/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Run tests
+        run: nvim --headless -u NONE -l tests/test_tdd_bot.lua
