@@ -87,7 +87,7 @@ dot shows remaining queued refactorings, decreases after each verified change,
 and hides count when queue completes. Tests rerun after every refactoring; if
 one breaks them, tdd-bot restores file and buffer to their pre-refactoring state
 and stops. If no refactoring comments exist, tdd-bot notifies you to add a
-`// Refactoring: <request>` comment.
+comment sequentially through Copilot and removes completed comments. 
 
 ## Configuration
 
