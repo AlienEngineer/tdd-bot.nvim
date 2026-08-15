@@ -29,6 +29,7 @@ local status_state = nil
 local status_pulse_state = nil
 local status_pulse_bright = true
 local status_pulse_generation = 0
+local status_pending_refactorings = nil
 
 local status_highlights = {
   red = { bright = "TddBotStatusRed", dim = "TddBotStatusRedDim" },
@@ -36,12 +37,13 @@ local status_highlights = {
   blue = { bright = "TddBotStatusBlue", dim = "TddBotStatusBlueDim" },
 }
 
-local function status_window_config()
+local function status_window_config(text)
+  local width = vim.fn.strdisplaywidth(text)
   return {
     relative = "editor",
-    width = 1,
+    width = width,
     height = 1,
-    col = math.max(vim.o.columns - 3, 0),
+    col = math.max(vim.o.columns - width - 2, 0),
     row = 1,
     style = "minimal",
     focusable = false,
@@ -49,10 +51,14 @@ local function status_window_config()
   }
 end
 
-local function render_status(state_name, bright)
+local function render_status(state_name, bright, pending_refactorings)
   local highlights = status_highlights[state_name]
   if not highlights then
     return
+  end
+  local text = "●"
+  if state_name == "blue" and type(pending_refactorings) == "number" and pending_refactorings > 0 then
+    text = string.format("● %d", pending_refactorings)
   end
 
   vim.api.nvim_set_hl(0, "TddBotStatusRed", { fg = "#ff0000" })
@@ -69,11 +75,11 @@ local function render_status(state_name, bright)
     vim.api.nvim_set_option_value("swapfile", false, { buf = status_bufnr })
   end
 
-  vim.api.nvim_buf_set_lines(status_bufnr, 0, -1, false, { "●" })
+  vim.api.nvim_buf_set_lines(status_bufnr, 0, -1, false, { text })
   vim.api.nvim_buf_clear_namespace(status_bufnr, -1, 0, -1)
   vim.api.nvim_buf_add_highlight(status_bufnr, -1, bright and highlights.bright or highlights.dim, 0, 0, -1)
 
-  local window_config = status_window_config()
+  local window_config = status_window_config(text)
   if status_winid and vim.api.nvim_win_is_valid(status_winid) then
     vim.api.nvim_win_set_config(status_winid, window_config)
   else
@@ -83,21 +89,24 @@ local function render_status(state_name, bright)
   status_state = state_name
 end
 
-local function set_status(state_name)
+local function set_status(state_name, pending_refactorings)
   if not status_highlights[state_name] then
     return
   end
   status_pulse_generation = status_pulse_generation + 1
   status_pulse_state = nil
   status_pulse_bright = true
-  render_status(state_name, true)
+  status_pending_refactorings = pending_refactorings
+  render_status(state_name, true, pending_refactorings)
 end
 
-local function start_status_pulse(state_name)
+local function start_status_pulse(state_name, pending_refactorings)
   if not status_highlights[state_name] then
     return
   end
+  status_pending_refactorings = pending_refactorings
   if status_pulse_state == state_name then
+    render_status(state_name, status_pulse_bright, pending_refactorings)
     return
   end
 
@@ -105,14 +114,14 @@ local function start_status_pulse(state_name)
   status_pulse_state = state_name
   status_pulse_bright = true
   local generation = status_pulse_generation
-  render_status(state_name, true)
+  render_status(state_name, true, pending_refactorings)
 
   local function pulse()
     if generation ~= status_pulse_generation or status_pulse_state ~= state_name then
       return
     end
     status_pulse_bright = not status_pulse_bright
-    render_status(state_name, status_pulse_bright)
+    render_status(state_name, status_pulse_bright, status_pending_refactorings)
     vim.defer_fn(pulse, 500)
   end
 
@@ -598,6 +607,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
         loop_running = false
         return
       end
+      start_status_pulse("blue", #refactorings - index)
       run_refactor_cycle(file_path, bufnr, refactorings, index + 1)
     end)
   end)
@@ -635,7 +645,7 @@ function M.run_refactor()
 
   local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
-  start_status_pulse("blue")
+  start_status_pulse("blue", #refactorings)
   capture_failure_for_file(file_path, function(failure, counts)
     if failure then
       loop_running = false
