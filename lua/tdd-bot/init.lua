@@ -647,6 +647,7 @@ function M.run_refactor()
 
   local refactorings = find_refactoring_comments(vim.api.nvim_get_current_buf())
   if #refactorings == 0 then
+    vim.notify("No refactoring found. Add a // Refactoring: <request> comment to start a refactoring.", vim.log.levels.INFO)
     return
   end
 
@@ -659,6 +660,7 @@ function M.run_refactor()
       set_status("red")
       return
     end
+    start_status_pulse("blue", #refactorings)
     run_refactor_cycle(file_path, bufnr, refactorings, 1)
   end)
 end

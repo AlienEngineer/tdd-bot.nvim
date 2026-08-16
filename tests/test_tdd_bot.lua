@@ -1103,7 +1103,12 @@ local function test_refactor_no_comments_found()
   bot.run_refactor()
 
   assert(#state.job_calls == 0, "expected no job when no refactoring comments present")
-  assert(#state.notify_calls == 0, "expected no-comment pre-check to avoid notifications")
+  assert(#state.status_calls == 0, "expected no status display when no refactoring comments present")
+  assert(#state.notify_calls == 1, "expected no-comment pre-check notification")
+  assert(state.notify_calls[1].msg:find("No refactoring found", 1, true),
+    "expected no-comment notification to explain no refactoring was found")
+  assert(state.notify_calls[1].msg:find("// Refactoring: <request>", 1, true),
+    "expected no-comment notification to show refactoring comment format")
 end
 
 local function test_refactor_aborts_when_tests_red()

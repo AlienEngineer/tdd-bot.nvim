@@ -85,8 +85,9 @@ Press `<leader>tdr`. tdd-bot runs tests first. If they pass, it applies each
 comment sequentially through Copilot and removes completed comments. Blue status
 dot shows remaining queued refactorings, decreases after each verified change,
 and hides count when queue completes. Tests rerun after every refactoring; if
-one breaks them, tdd-bot restores file and buffer to their pre-refactoring
-state and stops.
+one breaks them, tdd-bot restores file and buffer to their pre-refactoring state
+and stops. If no refactoring comments exist, tdd-bot notifies you to add a
+comment sequentially through Copilot and removes completed comments. 
 
 ## Configuration
 
