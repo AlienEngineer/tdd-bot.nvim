@@ -408,6 +408,18 @@ local function test_tdd_mapping_exists()
   assert(mapped_handler("<leader>tdd"), "expected <leader>tdd mapping")
 end
 
+local function test_tdd_saves_buffer_before_running_tests()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  assert(state.commands[1] == "write", "expected TDD to save current buffer before tests run")
+  assert(#state.run_calls == 1, "expected TDD to run tests after saving current buffer")
+end
+
 local function test_model_mapping_and_selector_uses_current_cli_models()
   reset_state()
   install_neotest()
@@ -1147,6 +1159,19 @@ local function test_tdr_mapping_exists()
   assert(mapped_handler("<leader>tdr"), "expected <leader>tdr mapping")
 end
 
+local function test_refactor_saves_buffer_before_running_tests()
+  reset_state()
+  neotest_mode = "pass"
+  state.buf_lines[current_buf] = { "// Refactoring: extract helper" }
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  assert(state.commands[1] == "write", "expected TDR to save current buffer before tests run")
+  assert(#state.run_calls == 1, "expected TDR to run tests after saving current buffer")
+end
+
 local function test_refactor_queue_waits_for_acceptance_before_next_job()
   reset_state()
   neotest_mode = "pass"
@@ -1182,12 +1207,13 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
     "// Refactoring: rename y to total",
   }
   state.job_calls[1].opts.on_exit(1, 0)
-  assert(#state.commands == 0, "expected pending candidate not to reload or save")
+  assert(#state.commands == 1 and state.commands[1] == "write",
+    "expected pending candidate not to reload or save")
   assert(#state.job_calls == 1, "expected next refactoring to wait for review decision")
   assert(bot._is_running(), "expected loop to stay running while review is unresolved")
   local popup = state.popup_calls[1]
   popup_mapping(popup, "a")()
-  assert(#state.commands == 2 and state.commands[1] == "e!" and state.commands[2] == "w",
+  assert(#state.commands == 3 and state.commands[2] == "e!" and state.commands[3] == "w",
     "expected accepted refactoring to reload from disk then save")
   assert(#state.job_calls == 2, "expected second refactoring to start a job after first completes")
   assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to decrease after verified refactoring")
@@ -1198,7 +1224,7 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
   state.file_contents["/tmp/sample_test.dart"] = { "local function helper() return 1 end", "local total = 2" }
   state.job_calls[2].opts.on_exit(1, 0)
   popup_mapping(state.popup_calls[2], "a")()
-  assert(#state.commands == 4 and state.commands[3] == "e!" and state.commands[4] == "w",
+  assert(#state.commands == 5 and state.commands[4] == "e!" and state.commands[5] == "w",
     "expected every completed refactoring to reload from disk then write through formatter")
   assert(#state.job_calls == 2, "expected no third job after all refactorings applied")
   assert(not bot._is_running(), "expected refactor loop to mark itself not running once complete")
@@ -1232,7 +1258,8 @@ local function test_refactor_rejection_restores_snapshot_and_advances_once()
   popup_mapping(popup, "q")()
   popup_mapping(popup, "q")()
 
-  assert(#state.commands == 0, "expected rejected candidate not to reload or save")
+  assert(#state.commands == 1 and state.commands[1] == "write",
+    "expected rejected candidate not to reload or save")
   assert(#state.run_calls == 1, "expected rejection not to verify candidate tests")
   assert(#state.job_calls == 2, "expected rejection to advance queue exactly once")
   for i, line in ipairs(pre_lines) do
@@ -1496,6 +1523,7 @@ local function test_ci_pipeline_tests_and_bumps_version_after_merged_pr()
 end
 
 test_tdd_mapping_exists()
+test_tdd_saves_buffer_before_running_tests()
 test_model_mapping_and_selector_uses_current_cli_models()
 test_selected_model_applies_to_jobs_and_falls_back_to_auto()
 test_custom_model_mapping_and_command_model_are_replaced()
@@ -1534,6 +1562,7 @@ test_different_file_gets_different_session_id()
 test_get_session_id_returns_nil_when_unset()
 test_tdc_mapping_exists()
 test_tdr_mapping_exists()
+test_refactor_saves_buffer_before_running_tests()
 test_refactor_queue_waits_for_acceptance_before_next_job()
 test_refactor_rejection_restores_snapshot_and_advances_once()
 test_duplicate_refactoring_requests_advance_after_rejection()
