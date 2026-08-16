@@ -23,7 +23,9 @@ local state = {
   next_window = 2000,
   window_calls = {},
   window_configs = {},
+  window_buffers = {},
   closed_windows = {},
+  autocmds = {},
   deferred_activity = {},
   -- mtime per path: bumped to simulate copilot changing a file
   mtimes = {},
@@ -51,6 +53,7 @@ local real = {
   nvim_win_is_valid = vim.api.nvim_win_is_valid,
   nvim_win_set_config = vim.api.nvim_win_set_config,
   nvim_win_close = vim.api.nvim_win_close,
+  nvim_create_autocmd = vim.api.nvim_create_autocmd,
   nvim_set_hl = vim.api.nvim_set_hl,
   nvim_buf_clear_namespace = vim.api.nvim_buf_clear_namespace,
   nvim_buf_add_highlight = vim.api.nvim_buf_add_highlight,
@@ -103,8 +106,10 @@ end
 
 vim.api.nvim_buf_set_lines = function(buf, _, _, _, lines)
   state.lines_by_buf[buf] = {}
+  state.buf_lines[buf] = {}
   for _, line in ipairs(lines) do
     state.lines_by_buf[buf][#state.lines_by_buf[buf] + 1] = line
+    state.buf_lines[buf][#state.buf_lines[buf] + 1] = line
   end
 end
 
@@ -136,6 +141,7 @@ vim.api.nvim_open_win = function(buf, enter, opts)
   state.next_window = state.next_window + 1
   state.valid_windows[win] = true
   state.window_configs[win] = opts
+  state.window_buffers[win] = buf
   table.insert(state.window_calls, { buf = buf, enter = enter, opts = opts, win = win })
   if opts.title then
     state.popup_buffers[buf] = state.lines_by_buf[buf] or {}
@@ -167,6 +173,16 @@ end
 vim.api.nvim_win_close = function(win, _)
   state.valid_windows[win] = false
   table.insert(state.closed_windows, win)
+  local buf = state.window_buffers[win]
+  for _, autocmd in ipairs(state.autocmds) do
+    if autocmd.opts.buffer == buf then
+      autocmd.opts.callback()
+    end
+  end
+end
+
+vim.api.nvim_create_autocmd = function(event, opts)
+  table.insert(state.autocmds, { event = event, opts = opts })
 end
 
 vim.api.nvim_set_hl = function(_, name, opts)
@@ -269,7 +285,9 @@ local function reset_state()
   state.next_window = 2000
   state.window_calls = {}
   state.window_configs = {}
+  state.window_buffers = {}
   state.closed_windows = {}
+  state.autocmds = {}
   state.deferred_activity = {}
   state.mtimes = {}
   state.open_bufs = {}
@@ -349,6 +367,15 @@ end
 local function mapped_handler(lhs)
   for _, map in ipairs(state.mapped) do
     if map.mode == "n" and map.lhs == lhs and type(map.rhs) == "function" then
+      return map.rhs
+    end
+  end
+  return nil
+end
+
+local function popup_mapping(popup, key)
+  for _, map in ipairs(state.mapped) do
+    if map.lhs == key and map.opts.buffer == popup.buf then
       return map.rhs
     end
   end
@@ -718,6 +745,10 @@ local function test_refactor_applied_changes_name_refactoring_in_popup()
     "local value = 1",
     "// Refactoring: extract value calculation",
   }
+  state.file_contents["/tmp/sample_test.dart"] = {
+    "local value = 1",
+    "// Refactoring: extract value calculation",
+  }
   install_neotest()
   local bot = load_bot()
   bot.setup()
@@ -736,6 +767,10 @@ local function test_refactor_applied_changes_name_refactoring_in_popup()
     "expected popup title to name refactoring")
   assert(popup.opts.title:find("sample_test.dart", 1, true),
     "expected popup title to name changed file")
+  assert(popup.opts.title:find("[a]ccept [r]eject", 1, true),
+    "expected refactoring popup to show review controls")
+  assert(popup_mapping(popup, "a") and popup_mapping(popup, "r") and popup_mapping(popup, "q") and popup_mapping(popup, "<Esc>"),
+    "expected refactoring popup to map accept and reject controls")
 end
 
 local function test_applied_changes_do_not_use_notification()
@@ -1112,11 +1147,17 @@ local function test_tdr_mapping_exists()
   assert(mapped_handler("<leader>tdr"), "expected <leader>tdr mapping")
 end
 
-local function test_refactor_starts_copilot_job_per_comment()
+local function test_refactor_queue_waits_for_acceptance_before_next_job()
   reset_state()
   neotest_mode = "pass"
   install_neotest()
   state.buf_lines[current_buf] = {
+    "local x = 1",
+    "// Refactoring: extract this into a helper function",
+    "local y = 2",
+    "// Refactoring: rename y to total",
+  }
+  state.file_contents["/tmp/sample_test.dart"] = {
     "local x = 1",
     "// Refactoring: extract this into a helper function",
     "local y = 2",
@@ -1134,18 +1175,29 @@ local function test_refactor_starts_copilot_job_per_comment()
   assert(prompt:find("extract this into a helper function", 1, true), "expected first refactoring text in prompt")
   assert(prompt:find("Line: 2", 1, true), "expected line number of first refactoring comment in prompt")
 
-  -- finish first job, should launch the second
+  -- First candidate must remain pending review.
+  state.file_contents["/tmp/sample_test.dart"] = {
+    "local function helper() return 1 end",
+    "local y = 2",
+    "// Refactoring: rename y to total",
+  }
   state.job_calls[1].opts.on_exit(1, 0)
+  assert(#state.commands == 0, "expected pending candidate not to reload or save")
+  assert(#state.job_calls == 1, "expected next refactoring to wait for review decision")
+  assert(bot._is_running(), "expected loop to stay running while review is unresolved")
+  local popup = state.popup_calls[1]
+  popup_mapping(popup, "a")()
   assert(#state.commands == 2 and state.commands[1] == "e!" and state.commands[2] == "w",
-    "expected completed refactoring to reload from disk then write through formatter")
+    "expected accepted refactoring to reload from disk then save")
   assert(#state.job_calls == 2, "expected second refactoring to start a job after first completes")
   assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to decrease after verified refactoring")
   local prompt2 = arg_after(state.job_calls[2].cmd, "-p")
   assert(prompt2:find("rename y to total", 1, true), "expected second refactoring text in prompt")
-  assert(prompt2:find("Line: 4", 1, true), "expected line number of second refactoring comment in prompt")
+  assert(prompt2:find("Line: 3", 1, true), "expected line number recalculated after accepted refactoring")
 
-  -- finish second job, loop should complete with no more jobs
+  state.file_contents["/tmp/sample_test.dart"] = { "local function helper() return 1 end", "local total = 2" }
   state.job_calls[2].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[2], "a")()
   assert(#state.commands == 4 and state.commands[3] == "e!" and state.commands[4] == "w",
     "expected every completed refactoring to reload from disk then write through formatter")
   assert(#state.job_calls == 2, "expected no third job after all refactorings applied")
@@ -1154,8 +1206,82 @@ local function test_refactor_starts_copilot_job_per_comment()
   assert(status.opts.width == 1, "expected completed refactoring status window to shrink to dot")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen", "expected completed refactoring status to be green")
 
-  assert(#state.closed_windows == 0, "expected status dot to remain visible after refactor completion")
+  assert(state.valid_windows[status.win], "expected status dot to remain visible after refactor completion")
   assert(#state.notify_calls == 0, "expected refactor completion to avoid notifications")
+end
+
+local function test_refactor_rejection_restores_snapshot_and_advances_once()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local pre_lines = {
+    "local x = 1",
+    "// Refactoring: extract helper",
+    "local y = 2",
+    "// Refactoring: rename y",
+  }
+  state.buf_lines[current_buf] = pre_lines
+  state.file_contents["/tmp/sample_test.dart"] = pre_lines
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "local function helper() end", "// Refactoring: rename y" }
+  state.job_calls[1].opts.on_exit(1, 0)
+  local popup = state.popup_calls[1]
+  popup_mapping(popup, "q")()
+  popup_mapping(popup, "q")()
+
+  assert(#state.commands == 0, "expected rejected candidate not to reload or save")
+  assert(#state.run_calls == 1, "expected rejection not to verify candidate tests")
+  assert(#state.job_calls == 2, "expected rejection to advance queue exactly once")
+  for i, line in ipairs(pre_lines) do
+    assert(state.file_contents["/tmp/sample_test.dart"][i] == line, "expected rejected candidate removed from disk")
+    assert(state.lines_by_buf[current_buf][i] == line, "expected rejected candidate removed from buffer")
+  end
+  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● 1", "expected rejected item removed from queue count")
+end
+
+local function test_duplicate_refactoring_requests_advance_after_rejection()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local lines = {
+    "// Refactoring: extract helper",
+    "// Refactoring: extract helper",
+  }
+  state.buf_lines[current_buf] = lines
+  state.file_contents["/tmp/sample_test.dart"] = lines
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "candidate" }
+  state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "r")()
+
+  assert(#state.job_calls == 2, "expected next duplicate request to start after rejection")
+  local prompt = arg_after(state.job_calls[2].cmd, "-p")
+  assert(prompt:find("Line: 2", 1, true), "expected queue to skip rejected duplicate request")
+end
+
+local function test_closing_refactoring_review_rejects_candidate()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local lines = { "// Refactoring: extract helper" }
+  state.buf_lines[current_buf] = lines
+  state.file_contents["/tmp/sample_test.dart"] = lines
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "candidate" }
+  state.job_calls[1].opts.on_exit(1, 0)
+  vim.api.nvim_win_close(state.popup_calls[1].win, true)
+
+  assert(state.file_contents["/tmp/sample_test.dart"][1] == lines[1], "expected closed review to restore disk")
+  assert(not bot._is_running(), "expected closed final review to complete queue")
 end
 
 local function test_refactor_status_transitions_from_blue_to_red_or_green()
@@ -1176,6 +1302,7 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
 
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "a")()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed",
     "expected broken refactoring verification to show red status")
   assert(state.lines_by_buf[status.buf][1] == "●", "expected failed refactoring status to hide pending count")
@@ -1188,6 +1315,7 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
   bot.setup()
   bot.run_refactor()
   state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "a")()
   assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusGreen",
     "expected completed refactoring to show green status")
   assert(state.lines_by_buf[state.status_calls[1].buf][1] == "●",
@@ -1242,6 +1370,7 @@ local function test_refactor_reverts_when_refactoring_breaks_tests()
     "// Refactoring: rename y to total",
   }
   state.buf_lines[current_buf] = pre_lines
+  state.file_contents["/tmp/sample_test.dart"] = pre_lines
   local bot = load_bot()
   bot.setup()
   bot.run_refactor()
@@ -1250,9 +1379,15 @@ local function test_refactor_reverts_when_refactoring_breaks_tests()
   local status = state.status_calls[1]
   assert(state.lines_by_buf[status.buf][1] == "● 2", "expected both refactorings in initial pending count")
 
-  -- first refactoring breaks the tests
+  -- Accepted first refactoring breaks tests.
+  state.file_contents["/tmp/sample_test.dart"] = {
+    "broken",
+    "local y = 2",
+    "// Refactoring: rename y to total",
+  }
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "a")()
 
   assert(#state.job_calls == 1, "expected loop to stop, no second refactoring job started")
   assert(not bot._is_running(), "expected refactor loop to stop running after a revert")
@@ -1265,7 +1400,7 @@ local function test_refactor_reverts_when_refactoring_breaks_tests()
     assert(state.lines_by_buf[current_buf][i] == line, "expected buffer reverted to pre-refactoring content")
   end
 
-  assert(#state.closed_windows == 0, "expected status dot to remain visible after reverting")
+  assert(state.valid_windows[status.win], "expected status dot to remain visible after reverting")
   assert(#state.notify_calls == 0, "expected reverted refactor to avoid notifications")
 end
 
@@ -1399,7 +1534,10 @@ test_different_file_gets_different_session_id()
 test_get_session_id_returns_nil_when_unset()
 test_tdc_mapping_exists()
 test_tdr_mapping_exists()
-test_refactor_starts_copilot_job_per_comment()
+test_refactor_queue_waits_for_acceptance_before_next_job()
+test_refactor_rejection_restores_snapshot_and_advances_once()
+test_duplicate_refactoring_requests_advance_after_rejection()
+test_closing_refactoring_review_rejects_candidate()
 test_refactor_status_transitions_from_blue_to_red_or_green()
 test_refactor_no_comments_found()
 test_refactor_aborts_when_tests_red()
@@ -1426,6 +1564,7 @@ vim.api.nvim_buf_is_valid = real.nvim_buf_is_valid
 vim.api.nvim_win_is_valid = real.nvim_win_is_valid
 vim.api.nvim_win_set_config = real.nvim_win_set_config
 vim.api.nvim_win_close = real.nvim_win_close
+vim.api.nvim_create_autocmd = real.nvim_create_autocmd
 vim.api.nvim_set_hl = real.nvim_set_hl
 vim.api.nvim_buf_clear_namespace = real.nvim_buf_clear_namespace
 vim.api.nvim_buf_add_highlight = real.nvim_buf_add_highlight

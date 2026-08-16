@@ -196,6 +196,57 @@ local function show_applied_changes(path, diff, work_label)
   vim.keymap.set("n", "<Esc>", close_popup, { buffer = buf, silent = true })
 end
 
+local function show_refactoring_review(path, diff, work_label, on_accept, on_reject)
+  local lines = vim.split(diff, "\n", { plain = true })
+  if #lines == 0 then
+    lines = { "Copilot made no textual changes." }
+  end
+
+  local width = math.min(math.max(60, vim.fn.strdisplaywidth(lines[1])), math.floor(vim.o.columns * 0.8))
+  for _, line in ipairs(lines) do
+    width = math.min(math.max(width, vim.fn.strdisplaywidth(line)), math.floor(vim.o.columns * 0.8))
+  end
+  local height = math.min(#lines, math.floor(vim.o.lines * 0.7))
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.api.nvim_set_option_value("filetype", "diff", { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    col = math.floor((vim.o.columns - width) / 2),
+    row = math.floor((vim.o.lines - height) / 2),
+    style = "minimal",
+    border = "rounded",
+    title = " tdd-bot: review " .. work_label .. " for " .. vim.fn.fnamemodify(path, ":t") .. " [a]ccept [r]eject ",
+    title_pos = "center",
+  })
+
+  local decided = false
+  local function decide(callback)
+    if decided then
+      return
+    end
+    decided = true
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    callback()
+  end
+
+  vim.keymap.set("n", "a", function() decide(on_accept) end, { buffer = buf, silent = true })
+  vim.keymap.set("n", "r", function() decide(on_reject) end, { buffer = buf, silent = true })
+  vim.keymap.set("n", "q", function() decide(on_reject) end, { buffer = buf, silent = true })
+  vim.keymap.set("n", "<Esc>", function() decide(on_reject) end, { buffer = buf, silent = true })
+  vim.api.nvim_create_autocmd("BufWipeout", {
+    buffer = buf,
+    once = true,
+    callback = function() decide(on_reject) end,
+  })
+end
+
 local function file_mtime(path)
   local stat = (vim.uv or vim.loop).fs_stat(path)
   return stat and stat.mtime and stat.mtime.sec or 0
@@ -534,7 +585,7 @@ local function capture_failure_for_file(file_path, done)
   vim.defer_fn(inspect_results, config.poll_interval_ms)
 end
 
-local function run_copilot_job(context, prompt, on_done)
+local function run_copilot_job(context, prompt, on_done, review)
   if vim.fn.executable("copilot") ~= 1 then
     on_done(false)
     return
@@ -546,6 +597,7 @@ local function run_copilot_job(context, prompt, on_done)
 
   local work_label = context.test_id or context.text or "current work"
   local snapshots = snapshot_open_buffers()
+  local disk_lines = review and vim.fn.readfile(context.file_path) or nil
   local cwd = find_project_root(context.file_path)
   local function start_job(model, is_fallback)
     local output = {}
@@ -565,8 +617,15 @@ local function run_copilot_job(context, prompt, on_done)
           start_job("auto", true)
           return
         end
-        reload_changed_buffers(snapshots, work_label)
-        on_done(true)
+        if review then
+          on_done(true, {
+            disk_lines = disk_lines,
+            candidate_lines = vim.fn.readfile(context.file_path),
+          })
+        else
+          reload_changed_buffers(snapshots, work_label)
+          on_done(true)
+        end
       end,
     })
     if job_id <= 0 then
@@ -591,7 +650,8 @@ local function start_copilot_refactor(refactor, on_done)
   run_copilot_job(
     refactor,
     prompt,
-    on_done)
+    on_done,
+    true)
 end
 
 local function run_fix_cycle(file_path, attempt)
@@ -623,14 +683,27 @@ local function run_fix_cycle(file_path, attempt)
   end)
 end
 
-local function revert_to_snapshot(file_path, bufnr, lines)
-  vim.fn.writefile(lines, file_path)
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-end
-
 local function reload_and_format_refactor()
   vim.cmd("e!")
   vim.cmd("w")
+end
+
+local function find_refactoring_comment(bufnr, text, occurrence)
+  local matches = 0
+  for _, refactoring in ipairs(find_refactoring_comments(bufnr)) do
+    if refactoring.text == text then
+      matches = matches + 1
+      if matches == occurrence then
+        return refactoring
+      end
+    end
+  end
+  return nil
+end
+
+local function restore_refactoring_snapshot(file_path, bufnr, disk_lines, buffer_lines)
+  vim.fn.writefile(disk_lines, file_path)
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, buffer_lines)
 end
 
 local function run_refactor_cycle(file_path, bufnr, refactorings, index)
@@ -640,28 +713,51 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
     return
   end
 
-  local refactor = refactorings[index]
+  local occurrence = 1
+  for i = 1, index - 1 do
+    if refactorings[i].text == refactorings[index].text and refactorings[i].rejected then
+      occurrence = occurrence + 1
+    end
+  end
+  local refactor = find_refactoring_comment(bufnr, refactorings[index].text, occurrence)
+  if not refactor then
+    loop_running = false
+    set_status("red")
+    notify_terminal_failure("Queued refactoring comment no longer exists: " .. refactorings[index].text)
+    return
+  end
   local pre_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
   start_copilot_refactor({
     file_path = file_path,
     line = refactor.line,
     text = refactor.text,
-  }, function(launched)
+  }, function(launched, candidate)
     if not launched then
       loop_running = false
       set_status("red")
       return
     end
 
-    reload_and_format_refactor()
-    capture_failure_for_file(file_path, function(failure, counts)
-      if failure then
-        set_status("red")
-        revert_to_snapshot(file_path, bufnr, pre_lines)
-        loop_running = false
-        return
-      end
+    local old_text = table.concat(candidate.disk_lines, "\n")
+    local new_text = table.concat(candidate.candidate_lines, "\n")
+    local diff = vim.diff(old_text, new_text, { result_type = "unified", ctxlen = 3 }) or ""
+    show_refactoring_review(file_path, diff, refactor.text, function()
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, candidate.candidate_lines)
+      reload_and_format_refactor()
+      capture_failure_for_file(file_path, function(failure, counts)
+        if failure then
+          set_status("red")
+          restore_refactoring_snapshot(file_path, bufnr, candidate.disk_lines, pre_lines)
+          loop_running = false
+          return
+        end
+        start_status_pulse("blue", #refactorings - index)
+        run_refactor_cycle(file_path, bufnr, refactorings, index + 1)
+      end)
+    end, function()
+      refactorings[index].rejected = true
+      restore_refactoring_snapshot(file_path, bufnr, candidate.disk_lines, pre_lines)
       start_status_pulse("blue", #refactorings - index)
       run_refactor_cycle(file_path, bufnr, refactorings, index + 1)
     end)
