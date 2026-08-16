@@ -597,6 +597,7 @@ local function test_applied_changes_open_in_diff_popup()
   assert(#state.popup_calls == 1, "expected changed file to open one popup")
   local popup = state.popup_calls[1]
   assert(popup.enter, "expected popup to receive focus")
+  assert(popup.opts.title:find("sample::failing", 1, true), "expected popup title to name failing test")
   assert(popup.opts.title:find("sample_test.dart", 1, true), "expected popup title to name changed file")
   assert(popup.opts.border == "rounded", "expected popup border")
   assert(popup.opts.relative == "editor", "expected floating editor popup")
@@ -606,6 +607,34 @@ local function test_applied_changes_open_in_diff_popup()
   assert(content:find("-line2", 1, true) and content:find("+line2 changed", 1, true),
     "expected popup to show unified diff of Copilot changes")
   assert(state.buffer_options[popup.buf].filetype == "diff", "expected diff syntax in popup")
+end
+
+local function test_refactor_applied_changes_name_refactoring_in_popup()
+  reset_state()
+  neotest_mode = "pass"
+  state.mtimes["/tmp/sample_test.dart"] = 1000
+  state.buf_lines[current_buf] = {
+    "local value = 1",
+    "// Refactoring: extract value calculation",
+  }
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  local call = state.job_calls[1]
+  state.mtimes["/tmp/sample_test.dart"] = 2000
+  state.file_contents["/tmp/sample_test.dart"] = {
+    "local function value() return 1 end",
+  }
+  call.opts.on_exit(1, 0)
+
+  assert(#state.popup_calls == 1, "expected changed refactoring file to open one popup")
+  local popup = state.popup_calls[1]
+  assert(popup.opts.title:find("extract value calculation", 1, true),
+    "expected popup title to name refactoring")
+  assert(popup.opts.title:find("sample_test.dart", 1, true),
+    "expected popup title to name changed file")
 end
 
 local function test_applied_changes_do_not_use_notification()
@@ -789,6 +818,44 @@ local function test_retry_loop_stops_at_max_retries()
   assert(found_reason, "expected give-up notification to include the last failure reason")
 end
 
+local function test_applied_changes_popup_closes_with_q_or_escape()
+  local function open_popup()
+    reset_state()
+    neotest_mode = "fail-results"
+    state.mtimes["/tmp/sample_test.dart"] = 1000
+    state.buf_lines[current_buf] = { "line1" }
+    install_neotest()
+    local bot = load_bot()
+    bot.setup()
+    bot.run_tdd()
+
+    state.mtimes["/tmp/sample_test.dart"] = 2000
+    state.file_contents["/tmp/sample_test.dart"] = { "line2" }
+    neotest_mode = "pass"
+    state.job_calls[1].opts.on_exit(1, 0)
+
+    return state.popup_calls[1]
+  end
+
+  local function close_with(key)
+    local popup = open_popup()
+    local mapping
+    for _, candidate in ipairs(state.mapped) do
+      if candidate.lhs == key and candidate.opts.buffer == popup.buf then
+        mapping = candidate
+        break
+      end
+    end
+
+    assert(mapping, "expected popup mapping for " .. key)
+    mapping.rhs()
+    assert(not state.valid_windows[popup.win], "expected " .. key .. " to close changes popup")
+  end
+
+  close_with("q")
+  close_with("<Esc>")
+end
+
 local function test_fallback_quickfix_failure_used()
   reset_state()
   neotest_mode = "fail-qf"
@@ -968,6 +1035,8 @@ local function test_refactor_starts_copilot_job_per_comment()
 
   -- finish first job, should launch the second
   state.job_calls[1].opts.on_exit(1, 0)
+  assert(#state.commands == 2 and state.commands[1] == "e!" and state.commands[2] == "w",
+    "expected completed refactoring to reload from disk then write through formatter")
   assert(#state.job_calls == 2, "expected second refactoring to start a job after first completes")
   assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to decrease after verified refactoring")
   local prompt2 = arg_after(state.job_calls[2].cmd, "-p")
@@ -976,6 +1045,8 @@ local function test_refactor_starts_copilot_job_per_comment()
 
   -- finish second job, loop should complete with no more jobs
   state.job_calls[2].opts.on_exit(1, 0)
+  assert(#state.commands == 4 and state.commands[3] == "e!" and state.commands[4] == "w",
+    "expected every completed refactoring to reload from disk then write through formatter")
   assert(#state.job_calls == 2, "expected no third job after all refactorings applied")
   assert(not bot._is_running(), "expected refactor loop to mark itself not running once complete")
   assert(state.lines_by_buf[status.buf][1] == "●", "expected completed refactoring queue to hide zero count")
@@ -1000,6 +1071,7 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
   assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to show one pending refactoring")
   table.remove(state.deferred_activity, 1)()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlueDim", "expected refactor dot to pulse blue")
+  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status count to remain while pulsing")
 
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
@@ -1199,6 +1271,8 @@ test_stale_failure_from_prior_run_is_ignored()
 test_buffer_lines_synced_from_disk_on_exit()
 test_no_reload_when_mtime_unchanged()
 test_applied_changes_open_in_diff_popup()
+test_applied_changes_popup_closes_with_q_or_escape()
+test_refactor_applied_changes_name_refactoring_in_popup()
 test_applied_changes_do_not_use_notification()
 test_no_notify_when_mtime_unchanged()
 test_copilot_exit_avoids_progress_notification()
