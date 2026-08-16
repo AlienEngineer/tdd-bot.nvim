@@ -6,6 +6,7 @@ local state = {
   commands = {},
   run_calls = {},
   job_calls = {},
+  select_calls = {},
   qflist = {},
   copilot_exists = true,
   jobstart_result = nil,
@@ -63,6 +64,8 @@ local real = {
   fnamemodify = vim.fn.fnamemodify,
   getqflist = vim.fn.getqflist,
   jobstart = vim.fn.jobstart,
+  chansend = vim.fn.chansend,
+  ui_select = vim.ui.select,
   uv_now = vim.uv and vim.uv.now or nil,
   uv_fs_stat = vim.uv and vim.uv.fs_stat or nil,
 }
@@ -238,6 +241,12 @@ vim.fn.jobstart = function(cmd, opts)
   return state.jobstart_result or #state.job_calls
 end
 
+vim.fn.chansend = function(_, _) return 0 end
+
+vim.ui.select = function(items, opts, on_choice)
+  table.insert(state.select_calls, { items = items, opts = opts, on_choice = on_choice })
+end
+
 vim.uv = vim.uv or {}
 vim.uv.now = function()
   fake_now = fake_now + 100
@@ -259,6 +268,7 @@ local function reset_state()
   state.commands = {}
   state.run_calls = {}
   state.job_calls = {}
+  state.select_calls = {}
   state.qflist = {}
   state.copilot_exists = true
   state.jobstart_result = nil
@@ -396,6 +406,97 @@ local function test_tdd_mapping_exists()
   local bot = load_bot()
   bot.setup()
   assert(mapped_handler("<leader>tdd"), "expected <leader>tdd mapping")
+end
+
+local function test_model_mapping_and_selector_uses_current_cli_models()
+  reset_state()
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+
+  local select_model = mapped_handler("<leader>tdm")
+  assert(select_model, "expected <leader>tdm mapping")
+  select_model()
+  local call = state.job_calls[1]
+  assert(call.cmd[1] == "copilot" and call.cmd[3] == "-i" and call.cmd[4] == "/model",
+    "expected selector to scrape Copilot /model output")
+  call.opts.on_stdout(1, { "auto", "gpt-5.3-codex", "claude-sonnet-4.5", "gpt-5.3-codex" })
+  call.opts.on_exit(1, 0)
+
+  assert(#state.select_calls == 1, "expected available models popup")
+  local popup = state.select_calls[1]
+  assert(popup.items[1] == "auto", "expected auto first")
+  assert(popup.items[2] == "gpt-5.3-codex" and popup.items[3] == "claude-sonnet-4.5",
+    "expected scraped model choices without duplicates")
+  popup.on_choice("claude-sonnet-4.5")
+  assert(bot._get_model() == "claude-sonnet-4.5", "expected selected model kept for session")
+  select_model()
+  state.job_calls[2].opts.on_stdout(2, { "gpt-5.3-codex" })
+  state.job_calls[2].opts.on_exit(2, 0)
+  state.select_calls[2].on_choice(nil)
+  assert(bot._get_model() == "claude-sonnet-4.5", "expected cancelled selector to retain current model")
+end
+
+local function test_selected_model_applies_to_jobs_and_falls_back_to_auto()
+  reset_state()
+  neotest_mode = "fail-results"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.select_model()
+  state.job_calls[1].opts.on_stdout(1, { "gpt-5.3-codex" })
+  state.job_calls[1].opts.on_exit(1, 0)
+  state.select_calls[1].on_choice("gpt-5.3-codex")
+
+  bot.run_tdd()
+  local first = state.job_calls[2]
+  assert(arg_after(first.cmd, "--model") == "gpt-5.3-codex", "expected chosen model in TDD job")
+  first.opts.on_stderr(2, { 'Model "gpt-5.3-codex" from --model flag is not available' })
+  first.opts.on_exit(2, 1)
+
+  local fallback = state.job_calls[3]
+  assert(arg_after(fallback.cmd, "--model") == "auto", "expected unavailable model retry with auto")
+  assert(arg_after(fallback.cmd, "--session-id") == arg_after(first.cmd, "--session-id"),
+    "expected fallback to retain Copilot session")
+  assert(arg_after(fallback.cmd, "-p") == arg_after(first.cmd, "-p"), "expected fallback to retain prompt")
+  assert(bot._get_model() == "gpt-5.3-codex", "expected fallback not to overwrite selection")
+end
+
+local function test_selected_model_applies_to_refactor_jobs()
+  reset_state()
+  neotest_mode = "pass"
+  state.buf_lines[current_buf] = { "// Refactoring: extract helper" }
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.select_model()
+  state.job_calls[1].opts.on_stdout(1, { "claude-sonnet-4.5" })
+  state.job_calls[1].opts.on_exit(1, 0)
+  state.select_calls[1].on_choice("claude-sonnet-4.5")
+
+  bot.run_refactor()
+  assert(arg_after(state.job_calls[2].cmd, "--model") == "claude-sonnet-4.5",
+    "expected selected model in refactoring job")
+end
+
+local function test_custom_model_mapping_and_command_model_are_replaced()
+  reset_state()
+  neotest_mode = "fail-results"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup({
+    model_keymap = "<leader>custom-model",
+    copilot_cmd = { "copilot", "--model", "old-model", "--custom-flag" },
+  })
+  assert(mapped_handler("<leader>custom-model"), "expected custom model mapping")
+  bot.run_tdd()
+  local cmd = state.job_calls[1].cmd
+  assert(arg_after(cmd, "--model") == "auto", "expected default auto model to replace configured model")
+  local models = 0
+  for _, arg in ipairs(cmd) do
+    if arg == "--model" then models = models + 1 end
+  end
+  assert(models == 1 and contains(cmd, "--custom-flag"), "expected one model flag and preserved custom command")
 end
 
 local function test_failing_run_starts_background_copilot()
@@ -1355,6 +1456,7 @@ local function test_readme_guides_user_from_purpose_to_installation_and_keymaps(
   assert(readme:find("<leader>tdd", 1, true), "expected run-tests keymap")
   assert(readme:find("<leader>tdc", 1, true), "expected clear-session keymap")
   assert(readme:find("<leader>tdr", 1, true), "expected refactor keymap")
+  assert(readme:find("<leader>tdm", 1, true), "expected model selector keymap")
   assert(readme:find("floating dot", 1, true), "expected TDD status indicator documentation")
 end
 
@@ -1394,6 +1496,10 @@ local function test_ci_pipeline_tests_and_bumps_version_after_merged_pr()
 end
 
 test_tdd_mapping_exists()
+test_model_mapping_and_selector_uses_current_cli_models()
+test_selected_model_applies_to_jobs_and_falls_back_to_auto()
+test_custom_model_mapping_and_command_model_are_replaced()
+test_selected_model_applies_to_refactor_jobs()
 test_failing_run_starts_background_copilot()
 test_failed_copilot_launch_stops_on_static_red_dot()
 test_running_loop_pulses_single_status_dot()
@@ -1469,6 +1575,8 @@ vim.fn.executable = real.executable
 vim.fn.fnamemodify = real.fnamemodify
 vim.fn.getqflist = real.getqflist
 vim.fn.jobstart = real.jobstart
+vim.fn.chansend = real.chansend
+vim.ui.select = real.ui_select
 if vim.uv then
   vim.uv.now = real.uv_now
   vim.uv.fs_stat = real.uv_fs_stat
