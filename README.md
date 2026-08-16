@@ -20,6 +20,7 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - on exit, syncs any buffer Copilot changed with its on-disk content (via `nvim_buf_set_lines`, not `:edit!`, so `FileType`/`BufReadPost` autocmds — and any LSP client attached through them — aren't re-triggered) and opens a popup with a unified diff of what changed
 - `<leader>tdc` clears the stored Copilot session for the current file, so the next `<leader>tdd` on it starts fresh
 - `<leader>tdr` scans the current buffer for `// Refactoring: <what to do>` comments and applies each one via a background Copilot job, one at a time; Copilot is instructed to remove the comment once the refactoring is applied
+- `<leader>tdm` opens model selector with `auto` plus models currently offered by Copilot CLI
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
 - after each refactoring, tests rerun; a broken refactoring reverts the file (disk + buffer) to its pre-refactoring content and stops the loop
 - a compact, non-focusable floating dot pulses green while TDD tests run, red
@@ -58,6 +59,7 @@ leader key.
 | `<leader>tdd` | Run tests for current file. On failure, start a background Copilot fix; rerun tests once Copilot exits. |
 | `<leader>tdc` | Clear stored Copilot session for current file. Next fix starts a fresh Copilot session. |
 | `<leader>tdr` | Apply every `// Refactoring: <request>` comment through Copilot. Tests must pass before refactoring begins. |
+| `<leader>tdm` | Choose model for future tdd-bot Copilot jobs. `auto` is default. |
 
 ### Fix failing tests
 
@@ -96,6 +98,7 @@ require("tdd-bot").setup({
   keymap = "<leader>tdd",
   clear_keymap = "<leader>tdc",
   refactor_keymap = "<leader>tdr",
+  model_keymap = "<leader>tdm",
   copilot_cmd = { "copilot", "--allow-all-tools", "--allow-all-urls" },
   result_timeout_ms = 120000,
   poll_interval_ms = 200,
@@ -104,3 +107,9 @@ require("tdd-bot").setup({
 ```
 
 Do not include `-p` in `copilot_cmd`; tdd-bot appends the prompt automatically.
+
+Press `<leader>tdm` to scrape installed, authenticated Copilot CLI's `/model`
+selector and choose a model for this Neovim session. `auto` is default and
+always available. Selection applies to future TDD fixes and refactorings; it is
+not persisted across restarts. If Copilot rejects selected model as unavailable,
+tdd-bot retries that job once with `auto`.

@@ -7,6 +7,7 @@ local config = {
   keymap = "<leader>tdd",
   clear_keymap = "<leader>tdc",
   refactor_keymap = "<leader>tdr",
+  model_keymap = "<leader>tdm",
   result_timeout_ms = 120000,
   poll_interval_ms = 200,
   max_retries = 5,
@@ -30,6 +31,7 @@ local status_pulse_state = nil
 local status_pulse_bright = true
 local status_pulse_generation = 0
 local status_pending_refactorings = nil
+local preferred_model = "auto"
 
 local status_highlights = {
   red = { bright = "TddBotStatusRed", dim = "TddBotStatusRedDim" },
@@ -289,22 +291,54 @@ local function find_refactoring_comments(bufnr)
   return refactorings
 end
 
-local function build_copilot_cmd(context, prompt)
+local function build_copilot_cmd(context, prompt, model)
   local project_root = find_project_root(context.file_path)
   local session_id = get_or_create_session_id(context.file_path)
   local cmd = {}
+  local skip_next = false
   for _, arg in ipairs(config.copilot_cmd) do
-    cmd[#cmd + 1] = arg
+    if skip_next then
+      skip_next = false
+    elseif arg == "--model" then
+      skip_next = true
+    elseif not arg:match("^%-%-model=") then
+      cmd[#cmd + 1] = arg
+    end
   end
   cmd[#cmd + 1] = "--add-dir"
   cmd[#cmd + 1] = project_root
   cmd[#cmd + 1] = "--deny-tool=shell(rm:*)"
   cmd[#cmd + 1] = "--deny-tool=shell(sudo:*)"
+  cmd[#cmd + 1] = "--model"
+  cmd[#cmd + 1] = model or preferred_model
   cmd[#cmd + 1] = "-p"
   cmd[#cmd + 1] = prompt
   cmd[#cmd + 1] = "--session-id"
   cmd[#cmd + 1] = session_id
   return cmd
+end
+
+local function output_has_unavailable_model_error(output)
+  return output:match("[Mm]odel%s+.-%s+from%s+%-%-model%s+flag%s+is%s+not%s+available") ~= nil
+end
+
+local function parse_models(output)
+  local seen = { auto = true }
+  local models = { "auto" }
+  output = output:gsub("\27%[[0-?]*[ -/]*[@-~]", ""):gsub("\r", "\n")
+  for token in output:gmatch("[%w][%w%._%-]*") do
+    local lower = token:lower()
+    if (lower:match("^gpt[%w%._%-]*$")
+        or lower:match("^claude[%w%._%-]*$")
+        or lower:match("^gemini[%w%._%-]*$")
+        or lower:match("^o[1-9][%w%._%-]*$")
+        or lower:match("^codex[%w%._%-]*$"))
+      and not seen[token] then
+      seen[token] = true
+      models[#models + 1] = token
+    end
+  end
+  return models
 end
 
 local function first_failed_result(results)
@@ -513,21 +547,35 @@ local function run_copilot_job(context, prompt, on_done)
   local work_label = context.test_id or context.text or "current work"
   local snapshots = snapshot_open_buffers()
   local cwd = find_project_root(context.file_path)
-  local job_id = vim.fn.jobstart(build_copilot_cmd(context, prompt), {
-    cwd = cwd,
-    stdout_buffered = false,
-    stderr_buffered = false,
-    on_exit = function(_, code)
-      copilot_job_id = nil
-      reload_changed_buffers(snapshots, work_label)
-      on_done(true)
-    end,
-  })
-  if job_id <= 0 then
-    on_done(false)
-    return
+  local function start_job(model, is_fallback)
+    local output = {}
+    local job_id = vim.fn.jobstart(build_copilot_cmd(context, prompt, model), {
+      cwd = cwd,
+      stdout_buffered = true,
+      stderr_buffered = true,
+      on_stdout = function(_, data)
+        output[#output + 1] = table.concat(data or {}, "\n")
+      end,
+      on_stderr = function(_, data)
+        output[#output + 1] = table.concat(data or {}, "\n")
+      end,
+      on_exit = function(_, _)
+        copilot_job_id = nil
+        if not is_fallback and model ~= "auto" and output_has_unavailable_model_error(table.concat(output, "\n")) then
+          start_job("auto", true)
+          return
+        end
+        reload_changed_buffers(snapshots, work_label)
+        on_done(true)
+      end,
+    })
+    if job_id <= 0 then
+      on_done(false)
+      return
+    end
+    copilot_job_id = job_id
   end
-  copilot_job_id = job_id
+  start_job(preferred_model, false)
 end
 
 local function start_copilot_background(failure, on_done)
@@ -676,6 +724,54 @@ function M.clear_session()
   end
 end
 
+function M.select_model()
+  if loop_running or copilot_job_id then
+    return
+  end
+  if vim.fn.executable("copilot") ~= 1 then
+    vim.notify("[tdd-bot] Copilot CLI is not available.", vim.log.levels.ERROR)
+    return
+  end
+
+  local output = {}
+  local job_id = vim.fn.jobstart({ "copilot", "--no-color", "-i", "/model" }, {
+    pty = true,
+    stdout_buffered = true,
+    stderr_buffered = true,
+    on_stdout = function(_, data)
+      output[#output + 1] = table.concat(data or {}, "\n")
+    end,
+    on_stderr = function(_, data)
+      output[#output + 1] = table.concat(data or {}, "\n")
+    end,
+    on_exit = function(_, code)
+      if code ~= 0 then
+        vim.notify("[tdd-bot] Could not read available Copilot models.", vim.log.levels.ERROR)
+        return
+      end
+      local models = parse_models(table.concat(output, "\n"))
+      if #models == 1 then
+        vim.notify("[tdd-bot] Copilot did not list any available models.", vim.log.levels.ERROR)
+        return
+      end
+      vim.ui.select(models, {
+        prompt = "Copilot model (current: " .. preferred_model .. ")",
+      }, function(choice)
+        if choice then
+          preferred_model = choice
+        end
+      end)
+    end,
+  })
+  if job_id <= 0 then
+    vim.notify("[tdd-bot] Could not start Copilot model selector.", vim.log.levels.ERROR)
+    return
+  end
+  vim.defer_fn(function()
+    vim.fn.chansend(job_id, "/exit\n")
+  end, 1000)
+end
+
 function M.setup(opts)
   if type(opts) == "table" then
     if type(opts.keymap) == "string" and opts.keymap ~= "" then
@@ -686,6 +782,9 @@ function M.setup(opts)
     end
     if type(opts.refactor_keymap) == "string" and opts.refactor_keymap ~= "" then
       config.refactor_keymap = opts.refactor_keymap
+    end
+    if type(opts.model_keymap) == "string" and opts.model_keymap ~= "" then
+      config.model_keymap = opts.model_keymap
     end
     if type(opts.result_timeout_ms) == "number" and opts.result_timeout_ms > 0 then
       config.result_timeout_ms = math.floor(opts.result_timeout_ms)
@@ -704,6 +803,7 @@ function M.setup(opts)
   vim.keymap.set("n", config.keymap, M.run_tdd, { desc = "tdd-bot: run tests and background fix on failure" })
   vim.keymap.set("n", config.clear_keymap, M.clear_session, { desc = "tdd-bot: clear stored copilot session for current file" })
   vim.keymap.set("n", config.refactor_keymap, M.run_refactor, { desc = "tdd-bot: apply // Refactoring: comments via copilot" })
+  vim.keymap.set("n", config.model_keymap, M.select_model, { desc = "tdd-bot: select Copilot model" })
 end
 
 function M._get_last_failure()
@@ -720,6 +820,10 @@ end
 
 function M._is_running()
   return loop_running
+end
+
+function M._get_model()
+  return preferred_model
 end
 
 return M
