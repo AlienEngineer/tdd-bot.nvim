@@ -13,7 +13,7 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - `<leader>tdd` runs tests for current file with `neotest`
 - `<leader>tdc` clears the stored Copilot session for the current file, so the next `<leader>tdd` on it starts fresh
 - `<leader>tdr` scans the current buffer for `// Refactoring: <what to do>` comments and queues each one for background Copilot review; Copilot is instructed to remove the comment once the refactoring is applied
-- `<leader>tdm` opens model selector with `auto` plus models currently offered by Copilot CLI
+- `<leader>tdm` opens model selector with `auto` plus every model ID returned by Copilot CLI
 
 
 ## Install with LazyVim
@@ -66,7 +66,7 @@ leader key.
 3. Watch status dot pulse while Copilot works.
 4. tdd-bot syncs Copilot's changed buffers and reruns tests after Copilot exits.
 
-Status dot stays visible in top-right corner. It pulses green while a TDD test
+The floating dot stays visible in top-right corner. It pulses green while a TDD test
 run waits for a result, red while fixing failures, and blue while refactoring.
 When work ends it becomes static green for success or static red for failure.
 If every retry fails, tdd-bot shows one notification with passed/failed totals
@@ -110,8 +110,9 @@ permission, path, URL, MCP/plugin, agent, model, prompt, and session flags from
 this setting, then appends its fixed project-confinement policy. Do not include
 `-p` in `copilot_cmd`; tdd-bot appends prompt automatically.
 
-Press `<leader>tdm` to scrape installed, authenticated Copilot CLI's `/model`
-selector and choose a model for this Neovim session. `auto` is default and
-always available. Selection applies to future TDD fixes and refactorings; it is
-not persisted across restarts. If Copilot rejects selected model as unavailable,
-tdd-bot retries that job once with `auto`.
+Press `<leader>tdm` to scrape every model ID returned by installed,
+authenticated Copilot CLI's `/model` selector and choose one for this Neovim
+session. Availability depends on account, organization policy, and CLI version.
+`auto` is default and always available. Selection applies to future TDD fixes
+and refactorings; it is not persisted across restarts. If Copilot rejects
+selected model as unavailable, tdd-bot retries that job once with `auto`.
