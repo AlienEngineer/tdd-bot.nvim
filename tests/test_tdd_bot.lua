@@ -432,14 +432,26 @@ local function test_model_mapping_and_selector_uses_current_cli_models()
   local call = state.job_calls[1]
   assert(call.cmd[1] == "copilot" and call.cmd[3] == "-i" and call.cmd[4] == "/model",
     "expected selector to scrape Copilot /model output")
-  call.opts.on_stdout(1, { "auto", "gpt-5.3-codex", "claude-sonnet-4.5", "gpt-5.3-codex" })
+  call.opts.on_stdout(1, {
+    "\27[1mSelect a model\27[0m",
+    "  > gpt-5.3-codex",
+    "  mai-code-1",
+    "  3. deepseek-r1",
+    "  claude-sonnet-4.5",
+    "  mai-code-1",
+    "Press Enter to confirm",
+  })
   call.opts.on_exit(1, 0)
 
   assert(#state.select_calls == 1, "expected available models popup")
   local popup = state.select_calls[1]
   assert(popup.items[1] == "auto", "expected auto first")
-  assert(popup.items[2] == "gpt-5.3-codex" and popup.items[3] == "claude-sonnet-4.5",
-    "expected scraped model choices without duplicates")
+  assert(#popup.items == 5
+      and popup.items[2] == "gpt-5.3-codex"
+      and popup.items[3] == "mai-code-1"
+      and popup.items[4] == "deepseek-r1"
+      and popup.items[5] == "claude-sonnet-4.5",
+    "expected every scraped model choice in CLI order without duplicates or UI text")
   popup.on_choice("claude-sonnet-4.5")
   assert(bot._get_model() == "claude-sonnet-4.5", "expected selected model kept for session")
   select_model()
@@ -471,6 +483,10 @@ local function test_selected_model_applies_to_jobs_and_falls_back_to_auto()
   assert(arg_after(fallback.cmd, "--session-id") == arg_after(first.cmd, "--session-id"),
     "expected fallback to retain Copilot session")
   assert(arg_after(fallback.cmd, "-p") == arg_after(first.cmd, "-p"), "expected fallback to retain prompt")
+  assert(arg_after(fallback.cmd, "--add-dir") == "/tmp", "expected fallback to retain project root")
+  assert(contains(fallback.cmd, "--available-tools=view,glob,rg,apply_patch,bash"),
+    "expected fallback to retain tool confinement")
+  assert(contains(fallback.cmd, "--deny-tool=url"), "expected fallback to retain URL denial")
   assert(bot._get_model() == "gpt-5.3-codex", "expected fallback not to overwrite selection")
 end
 
@@ -487,8 +503,14 @@ local function test_selected_model_applies_to_refactor_jobs()
   state.select_calls[1].on_choice("claude-sonnet-4.5")
 
   bot.run_refactor()
-  assert(arg_after(state.job_calls[2].cmd, "--model") == "claude-sonnet-4.5",
+  local call = state.job_calls[2]
+  assert(arg_after(call.cmd, "--model") == "claude-sonnet-4.5",
     "expected selected model in refactoring job")
+  assert(call.opts.cwd == "/tmp", "expected refactor job to run in project root")
+  assert(arg_after(call.cmd, "--add-dir") == "/tmp", "expected refactor job to allow only project root")
+  assert(contains(call.cmd, "--available-tools=view,glob,rg,apply_patch,bash"),
+    "expected refactor job to use tool allowlist")
+  assert(contains(call.cmd, "--deny-tool=url"), "expected refactor job to deny URL access")
 end
 
 local function test_custom_model_mapping_and_command_model_are_replaced()
@@ -522,8 +544,15 @@ local function test_failing_run_starts_background_copilot()
   assert(#state.job_calls == 1, "expected one background job")
   local call = state.job_calls[1]
   assert(call.cmd[1] == "copilot", "expected copilot binary")
-  assert(call.cmd[2] == "--allow-all-tools", "expected allow-all-tools flag")
-  assert(contains(call.cmd, "--add-dir"), "expected --add-dir flag")
+  assert(arg_after(call.cmd, "--add-dir") == "/tmp", "expected project root as only allowed directory")
+  assert(call.opts.cwd == "/tmp", "expected Copilot process to run from project root")
+  assert(contains(call.cmd, "--disallow-temp-dir"), "expected temp directory access blocked")
+  assert(contains(call.cmd, "--available-tools=view,glob,rg,apply_patch,bash"),
+    "expected only local project tools available")
+  assert(contains(call.cmd, "--deny-tool=url"), "expected URL and web access blocked")
+  assert(contains(call.cmd, "--disable-builtin-mcps"), "expected built-in MCP servers blocked")
+  assert(not contains(call.cmd, "--allow-all-urls"), "expected no unrestricted URL access")
+  assert(not contains(call.cmd, "--allow-all-paths"), "expected no unrestricted path access")
   assert(contains(call.cmd, "-p"), "expected -p prompt flag")
   local prompt_idx = nil
   for i, arg in ipairs(call.cmd) do
@@ -1030,7 +1059,7 @@ local function test_guard_when_job_already_running()
   assert(#state.job_calls == 1, "expected second run blocked while job active")
 end
 
-local function test_default_cmd_includes_speed_flags()
+local function test_default_cmd_includes_confinement_flags()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
@@ -1043,22 +1072,36 @@ local function test_default_cmd_includes_speed_flags()
     "expected --no-custom-instructions to skip loading global custom instructions/skills")
   assert(contains(cmd, "--disable-builtin-mcps"),
     "expected --disable-builtin-mcps to skip built-in MCP server startup")
+  assert(contains(cmd, "--disallow-temp-dir"), "expected temp directory to be unavailable")
+  assert(contains(cmd, "--deny-tool=url"), "expected URL tools to be denied")
+  assert(contains(cmd, "--available-tools=view,glob,rg,apply_patch,bash"),
+    "expected tool allowlist")
 end
 
-local function test_copilot_cmd_is_configurable()
+local function test_copilot_cmd_is_configurable_without_weakening_confinement()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
   local bot = load_bot()
-  bot.setup({ copilot_cmd = { "copilot", "--my-custom-flag" } })
+  bot.setup({
+    copilot_cmd = {
+      "copilot", "--my-custom-flag", "--model", "unsafe-model", "--allow-all", "--allow-all-urls",
+      "--add-dir", "/outside-project", "--additional-mcp-config", "mcp.json", "--plugin-dir=plugins",
+    },
+  })
   bot.run_tdd()
 
   local cmd = state.job_calls[1].cmd
   assert(cmd[1] == "copilot", "expected copilot binary")
   assert(cmd[2] == "--my-custom-flag", "expected configured prefix to be used")
-  assert(not contains(cmd, "--allow-all-tools"),
-    "expected default flags replaced, not merged, when copilot_cmd is overridden")
-  assert(contains(cmd, "--add-dir"), "expected structural flags still appended after custom prefix")
+  assert(arg_after(cmd, "--model") == "auto", "expected configured model replaced")
+  assert(arg_after(cmd, "--add-dir") == "/tmp", "expected configured directories removed")
+  assert(not contains(cmd, "--allow-all"), "expected broad permission flag removed")
+  assert(not contains(cmd, "--allow-all-urls"), "expected URL permission flag removed")
+  assert(not contains(cmd, "--additional-mcp-config"), "expected MCP config removed")
+  assert(not contains(cmd, "--plugin-dir=plugins"), "expected plugin config removed")
+  assert(contains(cmd, "--available-tools=view,glob,rg,apply_patch,bash"),
+    "expected confinement added after custom command")
 end
 
 local function test_generate_uuid_format_and_uniqueness()
@@ -1554,8 +1597,8 @@ test_exhausted_notification_includes_counts()
 test_retry_loop_stops_at_max_retries()
 test_fallback_quickfix_failure_used()
 test_guard_when_job_already_running()
-test_default_cmd_includes_speed_flags()
-test_copilot_cmd_is_configurable()
+test_default_cmd_includes_confinement_flags()
+test_copilot_cmd_is_configurable_without_weakening_confinement()
 test_generate_uuid_format_and_uniqueness()
 test_same_file_reuses_session_id_across_runs()
 test_different_file_gets_different_session_id()

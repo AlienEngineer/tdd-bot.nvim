@@ -20,7 +20,7 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - after a failure-fix Copilot job exits, syncs any changed buffer with on-disk content (via `nvim_buf_set_lines`, not `:edit!`, so `FileType`/`BufReadPost` autocmds — and any LSP client attached through them — aren't re-triggered) and opens a popup with a unified diff
 - `<leader>tdc` clears the stored Copilot session for the current file, so the next `<leader>tdd` on it starts fresh
 - `<leader>tdr` saves current buffer, scans it for `// Refactoring: <what to do>` comments, and queues each one for background Copilot review; Copilot is instructed to remove the comment once the refactoring is applied
-- `<leader>tdm` opens model selector with `auto` plus models currently offered by Copilot CLI
+- `<leader>tdm` opens model selector with `auto` plus every model ID returned by Copilot CLI
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
 - each refactoring opens a focused diff review: press `a` to accept or `r`, `q`, or `<Esc>` to reject; only accepted changes reload and save the buffer, then rerun tests
 - rejected changes restore pre-refactoring disk and buffer content without saving candidate changes; queue advances only after accept or reject
@@ -45,11 +45,21 @@ return {
 ```
 
 Restart Neovim, then let LazyVim install the plugin. `tdd-bot.nvim` requires the
-`copilot` CLI to be installed and authenticated. Its default Copilot command is:
+`copilot` CLI to be installed and authenticated. Every Copilot job starts in
+detected project root and limits file tools to that root (not system temp).
+Only local read, edit, search, and shell tools needed for project work are
+available. URL/web tools and MCP servers are unavailable.
 
 ```sh
-copilot --allow-all-tools --allow-all-urls --no-custom-instructions --disable-builtin-mcps
+copilot --available-tools=view,glob,rg,apply_patch,bash --disallow-temp-dir --deny-tool=url
 ```
+
+Copilot CLI requires `--allow-all-tools` for non-interactive jobs; tdd-bot adds
+it only after restricting available tools to this allowlist. This does not
+sandbox shell commands at OS level. For hard filesystem/network isolation,
+enable Copilot CLI's local sandbox and configure it to allow only current
+working directory, disable outbound/local network and bypasses, disable dev
+tool access and git/gh credential injection, and deny user-profile paths.
 
 ## Use tdd-bot
 
@@ -70,7 +80,7 @@ leader key.
 3. Watch status dot pulse while Copilot works.
 4. tdd-bot syncs Copilot's changed buffers and reruns tests after Copilot exits.
 
-Status dot stays visible in top-right corner. It pulses green while a TDD test
+The floating dot stays visible in top-right corner. It pulses green while a TDD test
 run waits for a result, red while fixing failures, and blue while refactoring.
 When work ends it becomes static green for success or static red for failure.
 If every retry fails, tdd-bot shows one notification with passed/failed totals
@@ -102,17 +112,21 @@ require("tdd-bot").setup({
   clear_keymap = "<leader>tdc",
   refactor_keymap = "<leader>tdr",
   model_keymap = "<leader>tdm",
-  copilot_cmd = { "copilot", "--allow-all-tools", "--allow-all-urls" },
+  copilot_cmd = { "copilot", "--no-color" },
   result_timeout_ms = 120000,
   poll_interval_ms = 200,
   max_retries = 5,
 })
 ```
 
-Do not include `-p` in `copilot_cmd`; tdd-bot appends the prompt automatically.
+`copilot_cmd` may set executable and benign CLI arguments. tdd-bot removes
+permission, path, URL, MCP/plugin, agent, model, prompt, and session flags from
+this setting, then appends its fixed project-confinement policy. Do not include
+`-p` in `copilot_cmd`; tdd-bot appends prompt automatically.
 
-Press `<leader>tdm` to scrape installed, authenticated Copilot CLI's `/model`
-selector and choose a model for this Neovim session. `auto` is default and
-always available. Selection applies to future TDD fixes and refactorings; it is
-not persisted across restarts. If Copilot rejects selected model as unavailable,
-tdd-bot retries that job once with `auto`.
+Press `<leader>tdm` to scrape every model ID returned by installed,
+authenticated Copilot CLI's `/model` selector and choose one for this Neovim
+session. Availability depends on account, organization policy, and CLI version.
+`auto` is default and always available. Selection applies to future TDD fixes
+and refactorings; it is not persisted across restarts. If Copilot rejects
+selected model as unavailable, tdd-bot retries that job once with `auto`.
