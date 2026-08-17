@@ -420,14 +420,26 @@ local function test_model_mapping_and_selector_uses_current_cli_models()
   local call = state.job_calls[1]
   assert(call.cmd[1] == "copilot" and call.cmd[3] == "-i" and call.cmd[4] == "/model",
     "expected selector to scrape Copilot /model output")
-  call.opts.on_stdout(1, { "auto", "gpt-5.3-codex", "claude-sonnet-4.5", "gpt-5.3-codex" })
+  call.opts.on_stdout(1, {
+    "\27[1mSelect a model\27[0m",
+    "  > gpt-5.3-codex",
+    "  mai-code-1",
+    "  3. deepseek-r1",
+    "  claude-sonnet-4.5",
+    "  mai-code-1",
+    "Press Enter to confirm",
+  })
   call.opts.on_exit(1, 0)
 
   assert(#state.select_calls == 1, "expected available models popup")
   local popup = state.select_calls[1]
   assert(popup.items[1] == "auto", "expected auto first")
-  assert(popup.items[2] == "gpt-5.3-codex" and popup.items[3] == "claude-sonnet-4.5",
-    "expected scraped model choices without duplicates")
+  assert(#popup.items == 5
+      and popup.items[2] == "gpt-5.3-codex"
+      and popup.items[3] == "mai-code-1"
+      and popup.items[4] == "deepseek-r1"
+      and popup.items[5] == "claude-sonnet-4.5",
+    "expected every scraped model choice in CLI order without duplicates or UI text")
   popup.on_choice("claude-sonnet-4.5")
   assert(bot._get_model() == "claude-sonnet-4.5", "expected selected model kept for session")
   select_model()

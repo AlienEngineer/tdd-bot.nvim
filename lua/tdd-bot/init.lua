@@ -459,14 +459,11 @@ local function parse_models(output)
   local seen = { auto = true }
   local models = { "auto" }
   output = output:gsub("\27%[[0-?]*[ -/]*[@-~]", ""):gsub("\r", "\n")
-  for token in output:gmatch("[%w][%w%._%-]*") do
-    local lower = token:lower()
-    if (lower:match("^gpt[%w%._%-]*$")
-        or lower:match("^claude[%w%._%-]*$")
-        or lower:match("^gemini[%w%._%-]*$")
-        or lower:match("^o[1-9][%w%._%-]*$")
-        or lower:match("^codex[%w%._%-]*$"))
-      and not seen[token] then
+  for line in output:gmatch("[^\n]+") do
+    local token = line:match("^%s*([%w][%w%._%-]*)%s*$")
+      or line:match("^%s*%d+[%)%.]%s*([%w][%w%._%-]*)%s*$")
+      or line:match("^%s*[^%w]*([%w][%w%._%-]*)%s*$")
+    if token and not seen[token] then
       seen[token] = true
       models[#models + 1] = token
     end
