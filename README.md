@@ -45,11 +45,21 @@ return {
 ```
 
 Restart Neovim, then let LazyVim install the plugin. `tdd-bot.nvim` requires the
-`copilot` CLI to be installed and authenticated. Its default Copilot command is:
+`copilot` CLI to be installed and authenticated. Every Copilot job starts in
+detected project root and limits file tools to that root (not system temp).
+Only local read, edit, search, and shell tools needed for project work are
+available. URL/web tools and MCP servers are unavailable.
 
 ```sh
-copilot --allow-all-tools --allow-all-urls --no-custom-instructions --disable-builtin-mcps
+copilot --available-tools=view,glob,rg,apply_patch,bash --disallow-temp-dir --deny-tool=url
 ```
+
+Copilot CLI requires `--allow-all-tools` for non-interactive jobs; tdd-bot adds
+it only after restricting available tools to this allowlist. This does not
+sandbox shell commands at OS level. For hard filesystem/network isolation,
+enable Copilot CLI's local sandbox and configure it to allow only current
+working directory, disable outbound/local network and bypasses, disable dev
+tool access and git/gh credential injection, and deny user-profile paths.
 
 ## Use tdd-bot
 
@@ -102,14 +112,17 @@ require("tdd-bot").setup({
   clear_keymap = "<leader>tdc",
   refactor_keymap = "<leader>tdr",
   model_keymap = "<leader>tdm",
-  copilot_cmd = { "copilot", "--allow-all-tools", "--allow-all-urls" },
+  copilot_cmd = { "copilot", "--no-color" },
   result_timeout_ms = 120000,
   poll_interval_ms = 200,
   max_retries = 5,
 })
 ```
 
-Do not include `-p` in `copilot_cmd`; tdd-bot appends the prompt automatically.
+`copilot_cmd` may set executable and benign CLI arguments. tdd-bot removes
+permission, path, URL, MCP/plugin, agent, model, prompt, and session flags from
+this setting, then appends its fixed project-confinement policy. Do not include
+`-p` in `copilot_cmd`; tdd-bot appends prompt automatically.
 
 Press `<leader>tdm` to scrape installed, authenticated Copilot CLI's `/model`
 selector and choose a model for this Neovim session. `auto` is default and
