@@ -13,11 +13,79 @@ local config = {
   max_retries = 5,
   copilot_cmd = {
     "copilot",
-    "--allow-all-tools",
-    "--allow-all-urls",
-    "--no-custom-instructions",
-    "--disable-builtin-mcps",
   },
+}
+
+-- `--allow-all-tools` is required by Copilot CLI prompt mode. The available-tools
+-- filter below makes that approval apply only to these local project tools.
+local COPILOT_AVAILABLE_TOOLS = "view,glob,rg,apply_patch,bash"
+local COPILOT_SECURITY_ARGS = {
+  "--no-custom-instructions",
+  "--disable-builtin-mcps",
+  "--disallow-temp-dir",
+  "--available-tools=" .. COPILOT_AVAILABLE_TOOLS,
+  "--deny-tool=url",
+  "--deny-tool=shell(rm:*)",
+  "--deny-tool=shell(sudo:*)",
+  "--allow-all-tools",
+}
+local SECURITY_OPTION_VALUES = {
+  ["--add-dir"] = true,
+  ["--add-github-mcp-tool"] = true,
+  ["--add-github-mcp-toolset"] = true,
+  ["--additional-mcp-config"] = true,
+  ["--agent"] = true,
+  ["--allow-tool"] = true,
+  ["--allow-url"] = true,
+  ["--attachment"] = true,
+  ["--available-tools"] = true,
+  ["--deny-tool"] = true,
+  ["--deny-url"] = true,
+  ["--disable-mcp-server"] = true,
+  ["--excluded-tools"] = true,
+  ["--extension-sdk-path"] = true,
+  ["--model"] = true,
+  ["--plugin-dir"] = true,
+  ["--prompt"] = true,
+  ["--resume"] = true,
+  ["--session-id"] = true,
+  ["-C"] = true,
+  ["-p"] = true,
+  ["-r"] = true,
+}
+local SECURITY_OPTION_PREFIXES = {
+  "--add-dir=",
+  "--add-github-mcp-tool=",
+  "--add-github-mcp-toolset=",
+  "--additional-mcp-config=",
+  "--agent=",
+  "--allow-tool=",
+  "--allow-url=",
+  "--attachment=",
+  "--available-tools=",
+  "--deny-tool=",
+  "--deny-url=",
+  "--disable-mcp-server=",
+  "--excluded-tools=",
+  "--extension-sdk-path=",
+  "--model=",
+  "--plugin-dir=",
+  "--prompt=",
+  "--resume=",
+  "--session-id=",
+}
+local SECURITY_FLAGS = {
+  ["--allow-all"] = true,
+  ["--allow-all-mcp-server-instructions"] = true,
+  ["--allow-all-paths"] = true,
+  ["--allow-all-tools"] = true,
+  ["--allow-all-urls"] = true,
+  ["--autopilot"] = true,
+  ["--disable-builtin-mcps"] = true,
+  ["--disallow-temp-dir"] = true,
+  ["--enable-all-github-mcp-tools"] = true,
+  ["--no-custom-instructions"] = true,
+  ["--yolo"] = true,
 }
 
 local last_failure = nil
@@ -345,21 +413,35 @@ end
 local function build_copilot_cmd(context, prompt, model)
   local project_root = find_project_root(context.file_path)
   local session_id = get_or_create_session_id(context.file_path)
-  local cmd = {}
+  local cmd = { config.copilot_cmd[1] }
   local skip_next = false
-  for _, arg in ipairs(config.copilot_cmd) do
+  for index, arg in ipairs(config.copilot_cmd) do
+    if index == 1 then
+      goto continue
+    end
     if skip_next then
       skip_next = false
-    elseif arg == "--model" then
+    elseif SECURITY_OPTION_VALUES[arg] then
       skip_next = true
-    elseif not arg:match("^%-%-model=") then
-      cmd[#cmd + 1] = arg
+    elseif not SECURITY_FLAGS[arg] then
+      local security_option = false
+      for _, prefix in ipairs(SECURITY_OPTION_PREFIXES) do
+        if arg:sub(1, #prefix) == prefix then
+          security_option = true
+          break
+        end
+      end
+      if not security_option then
+        cmd[#cmd + 1] = arg
+      end
     end
+    ::continue::
+  end
+  for _, arg in ipairs(COPILOT_SECURITY_ARGS) do
+    cmd[#cmd + 1] = arg
   end
   cmd[#cmd + 1] = "--add-dir"
   cmd[#cmd + 1] = project_root
-  cmd[#cmd + 1] = "--deny-tool=shell(rm:*)"
-  cmd[#cmd + 1] = "--deny-tool=shell(sudo:*)"
   cmd[#cmd + 1] = "--model"
   cmd[#cmd + 1] = model or preferred_model
   cmd[#cmd + 1] = "-p"
