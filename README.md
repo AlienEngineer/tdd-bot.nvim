@@ -10,11 +10,25 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 
 ## Features
 
-- `<leader>tdd` runs tests for current file with `neotest`
+- `<leader>tdd` saves current buffer, then runs tests for current file with `neotest`
+- shows a compact non-focusable floating status dot that pulses while tests or
+  Copilot work is running
+- ignores stale pass/fail state left over from a prior run until the current run is confirmed underway (guards against neotest's cumulative results cache misreporting)
+- on failure, runs Copilot non-interactive fix in background, resuming the same Copilot session for that file across retries/reruns (per-file, in-memory only, not persisted across Neovim restarts)
+- when retries are exhausted, notifies with the last failing test's message so you know why Copilot couldn't fix it
+- reruns tests once automatically after Copilot exits
+- after a failure-fix Copilot job exits, syncs any changed buffer with on-disk content (via `nvim_buf_set_lines`, not `:edit!`, so `FileType`/`BufReadPost` autocmds — and any LSP client attached through them — aren't re-triggered) and opens a popup with a unified diff
 - `<leader>tdc` clears the stored Copilot session for the current file, so the next `<leader>tdd` on it starts fresh
-- `<leader>tdr` scans the current buffer for `// Refactoring: <what to do>` comments and queues each one for background Copilot review; Copilot is instructed to remove the comment once the refactoring is applied
+- `<leader>tdr` saves current buffer, scans it for `// Refactoring: <what to do>` comments, and queues each one for background Copilot review; Copilot is instructed to remove the comment once the refactoring is applied
 - `<leader>tdm` opens model selector with `auto` plus every model ID returned by Copilot CLI
-
+- refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
+- each refactoring opens a focused diff review: press `a` to accept or `r`, `q`, or `<Esc>` to reject; only accepted changes reload and save the buffer, then rerun tests
+- rejected changes restore pre-refactoring disk and buffer content without saving candidate changes; queue advances only after accept or reject
+- a broken accepted refactoring reverts file (disk + buffer) to pre-refactoring content and stops loop
+- a compact, non-focusable floating dot pulses green while TDD tests run, red
+  during failure recovery, and blue during refactoring; blue shows remaining
+  refactoring count, which decreases after each verified refactoring and hides
+  when complete; completed loops leave a static green or red dot
 
 ## Install with LazyVim
 
@@ -54,9 +68,9 @@ leader key.
 
 | Mapping | Action |
 | --- | --- |
-| `<leader>tdd` | Run tests for current file. On failure, start a background Copilot fix; rerun tests once Copilot exits. |
+| `<leader>tdd` | Save current buffer and run tests for current file. On failure, start a background Copilot fix; rerun tests once Copilot exits. |
 | `<leader>tdc` | Clear stored Copilot session for current file. Next fix starts a fresh Copilot session. |
-| `<leader>tdr` | Apply every `// Refactoring: <request>` comment through Copilot. Tests must pass before refactoring begins. |
+| `<leader>tdr` | Save current buffer, then apply every `// Refactoring: <request>` comment through Copilot. Tests must pass before refactoring begins. |
 | `<leader>tdm` | Choose model for future tdd-bot Copilot jobs. `auto` is default. |
 
 ### Fix failing tests

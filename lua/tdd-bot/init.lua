@@ -853,6 +853,7 @@ function M.run_tdd()
     return
   end
 
+  vim.cmd("write")
   loop_running = true
   start_status_pulse("green")
   run_fix_cycle(file_path, 0)
@@ -868,6 +869,7 @@ function M.run_refactor()
     return
   end
 
+  vim.cmd("write")
   local refactorings = find_refactoring_comments(vim.api.nvim_get_current_buf())
   if #refactorings == 0 then
     vim.notify("No refactoring found. Add a // Refactoring: <request> comment to start a refactoring.", vim.log.levels.INFO)
