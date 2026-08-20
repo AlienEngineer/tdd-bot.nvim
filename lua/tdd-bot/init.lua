@@ -102,6 +102,8 @@ local status_pulse_generation = 0
 local status_pending_refactorings = nil
 local preferred_model = "auto"
 local saved_models = { "auto" }
+local tdd_mode_enabled = false
+local tdd_mode_augroup = nil
 
 local status_highlights = {
   red = { bright = "TddBotStatusRed", dim = "TddBotStatusRedDim" },
@@ -128,9 +130,9 @@ local function render_status(state_name, bright, pending_refactorings)
   if not highlights then
     return
   end
-  local text = "●"
+  local text = "● " .. (tdd_mode_enabled and "On" or "Off")
   if state_name == "blue" and type(pending_refactorings) == "number" and pending_refactorings > 0 then
-    text = string.format("● %d", pending_refactorings)
+    text = string.format("%s %d", text, pending_refactorings)
   end
 
   vim.api.nvim_set_hl(0, "TddBotStatusRed", { fg = "#ff0000" })
@@ -623,7 +625,7 @@ local function first_failed_quickfix(file_path)
   return nil
 end
 
-local function capture_failure_for_file(file_path, done)
+local function capture_failure_for_file(file_path, bufnr, done)
   local ok, neotest = pcall(require, "neotest")
   if not ok then
     done(nil)
@@ -661,7 +663,7 @@ local function capture_failure_for_file(file_path, done)
 
     for _, adapter_id in ipairs(adapter_ids) do
       if neotest.state.status_counts then
-        local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id, { buffer = vim.api.nvim_get_current_buf() })
+        local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id, { buffer = bufnr })
         if ok_counts and counts and type(counts.running) == "number" and counts.running > 0 then
           has_running = true
           saw_running = true
@@ -817,7 +819,7 @@ end
 local start_refactoring_if_present
 
 local function run_fix_cycle(file_path, bufnr, attempt)
-  capture_failure_for_file(file_path, function(failure, counts)
+  capture_failure_for_file(file_path, bufnr, function(failure, counts)
     local passed = counts and counts.passed or 0
     local failed = counts and counts.failed or 0
     if not failure then
@@ -918,7 +920,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
         vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, candidate.candidate_lines)
       end)
       reload_and_format_refactor(bufnr)
-      capture_failure_for_file(file_path, function(failure, counts)
+      capture_failure_for_file(file_path, bufnr, function(failure, counts)
         if failure then
           set_status("red")
           restore_refactoring_snapshot(file_path, bufnr, candidate.disk_lines, pre_lines)
@@ -948,8 +950,7 @@ start_refactoring_if_present = function(file_path, bufnr)
   return true
 end
 
-function M.run_tdd()
-  local file_path = vim.api.nvim_buf_get_name(0)
+local function start_tdd_cycle(file_path, bufnr, save_buffer)
   if file_path == nil or file_path == "" then
     return
   end
@@ -958,12 +959,25 @@ function M.run_tdd()
     return
   end
 
-  vim.cmd("write")
-  local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
+  if save_buffer then
+    vim.cmd("write")
+  end
   acquire_tdd_buffer_lock(bufnr)
   start_status_pulse("green")
   run_fix_cycle(file_path, bufnr, 0)
+end
+
+function M.run_tdd()
+  if tdd_mode_enabled then
+    tdd_mode_enabled = false
+    render_status(status_state or "green", status_pulse_bright, status_pending_refactorings)
+    return
+  end
+
+  tdd_mode_enabled = true
+  local bufnr = vim.api.nvim_get_current_buf()
+  start_tdd_cycle(vim.api.nvim_buf_get_name(bufnr), bufnr, true)
 end
 
 function M.run_refactor()
@@ -979,7 +993,7 @@ function M.run_refactor()
   vim.cmd("write")
   local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
-  capture_failure_for_file(file_path, function(failure, counts)
+  capture_failure_for_file(file_path, bufnr, function(failure, counts)
     if failure then
       finish_loop("red")
       return
@@ -1041,6 +1055,26 @@ function M.setup(opts)
   vim.keymap.set("n", config.clear_keymap, M.clear_session, { desc = "tdd-bot: clear stored copilot session for current file" })
   vim.keymap.set("n", config.refactor_keymap, M.run_refactor, { desc = "tdd-bot: apply // Refactoring: comments via copilot" })
   vim.keymap.set("n", config.model_keymap, M.select_model, { desc = "tdd-bot: select Copilot model" })
+
+  if tdd_mode_augroup then
+    vim.api.nvim_del_augroup_by_id(tdd_mode_augroup)
+  end
+  tdd_mode_augroup = vim.api.nvim_create_augroup("TddBotMode", { clear = true })
+  vim.api.nvim_create_autocmd("BufWritePost", {
+    group = tdd_mode_augroup,
+    callback = function(args)
+      if not tdd_mode_enabled then
+        return
+      end
+      local bufnr = args.buf
+      local file_path = args.file
+      if file_path == nil or file_path == "" then
+        file_path = vim.api.nvim_buf_get_name(bufnr)
+      end
+      start_tdd_cycle(file_path, bufnr, false)
+    end,
+  })
+  render_status(status_state or "green", status_pulse_bright, status_pending_refactorings)
 end
 
 function M._get_last_failure()
@@ -1061,6 +1095,10 @@ end
 
 function M._get_model()
   return preferred_model
+end
+
+function M._is_mode_enabled()
+  return tdd_mode_enabled
 end
 
 return M
