@@ -804,7 +804,7 @@ local function fetch_suite_results(neotest, adapter_id)
   return {}
 end
 
-local function collect_suite_state(neotest)
+local function collect_suite_state(neotest, bufnr)
   local snapshot = {
     has_running = false,
     has_failed = false,
@@ -822,7 +822,7 @@ local function collect_suite_state(neotest)
 
   for _, adapter_id in ipairs(neotest.state.adapter_ids() or {}) do
     if neotest.state.status_counts then
-      local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id)
+      local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id, { buffer = bufnr })
       if ok_counts and type(counts) == "table" then
         for _, status in ipairs({ "passed", "failed", "skipped", "running" }) do
           local count = counts[status]
@@ -895,7 +895,7 @@ local function first_failed_quickfix(file_path)
   return nil
 end
 
-local function capture_suite_failure(file_path, done, generation)
+local function capture_suite_failure(file_path, bufnr, done, generation)
   local ok, neotest = pcall(require, "neotest")
   if not ok then
     done(nil)
@@ -904,7 +904,7 @@ local function capture_suite_failure(file_path, done, generation)
 
   last_failure = nil
   local root = find_project_root(file_path)
-  local previous = collect_suite_state(neotest)
+  local previous = collect_suite_state(neotest, bufnr)
   local run_ok = pcall(neotest.run.run, root)
   if not run_ok then
     done({
@@ -932,7 +932,7 @@ local function capture_suite_failure(file_path, done, generation)
     if generation and generation ~= tdd_run_generation then
       return
     end
-    local current = collect_suite_state(neotest)
+    local current = collect_suite_state(neotest, bufnr)
     if current.has_running then
       saw_running = true
       saw_fresh_state = true
@@ -1093,7 +1093,7 @@ end
 local start_refactoring_if_present
 
 local function run_fix_cycle(file_path, bufnr, attempt, generation)
-  capture_suite_failure(file_path, function(failure, counts)
+  capture_suite_failure(file_path, bufnr, function(failure, counts)
     if generation ~= tdd_run_generation then
       return
     end
@@ -1258,7 +1258,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
     show_refactoring_review(file_path, diff, refactor.text, function()
       sync_candidate_buffers(candidate_state.changes)
       reload_and_format_refactor(bufnr)
-      capture_suite_failure(file_path, function(failure, counts)
+      capture_suite_failure(file_path, bufnr, function(failure, counts)
         if failure then
           start_status_pulse("red")
           if repair_attempt >= config.max_refactor_retries then
@@ -1366,7 +1366,7 @@ function M.run_refactor()
   vim.cmd("write")
   local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
-  capture_suite_failure(file_path, function(failure, counts)
+  capture_suite_failure(file_path, bufnr, function(failure, counts)
     if failure then
       finish_loop("red")
       if failure.suite_error then
