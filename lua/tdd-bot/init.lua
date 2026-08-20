@@ -763,13 +763,17 @@ local function start_copilot_refactor(refactor, on_done)
     true)
 end
 
-local function run_fix_cycle(file_path, attempt)
+local start_refactoring_if_present
+
+local function run_fix_cycle(file_path, bufnr, attempt)
   capture_failure_for_file(file_path, function(failure, counts)
     local passed = counts and counts.passed or 0
     local failed = counts and counts.failed or 0
     if not failure then
-      loop_running = false
-      set_status("green")
+      if not start_refactoring_if_present(file_path, bufnr) then
+        loop_running = false
+        set_status("green")
+      end
       return
     end
     start_status_pulse("red")
@@ -783,7 +787,7 @@ local function run_fix_cycle(file_path, attempt)
     end
     start_copilot_background(failure, function(launched)
       if launched then
-        run_fix_cycle(file_path, attempt + 1)
+        run_fix_cycle(file_path, bufnr, attempt + 1)
       else
         loop_running = false
         set_status("red")
@@ -873,6 +877,17 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   end)
 end
 
+start_refactoring_if_present = function(file_path, bufnr)
+  local refactorings = find_refactoring_comments(bufnr)
+  if #refactorings == 0 then
+    return false
+  end
+
+  start_status_pulse("blue", #refactorings)
+  run_refactor_cycle(file_path, bufnr, refactorings, 1)
+  return true
+end
+
 function M.run_tdd()
   local file_path = vim.api.nvim_buf_get_name(0)
   if file_path == nil or file_path == "" then
@@ -886,7 +901,7 @@ function M.run_tdd()
   vim.cmd("write")
   loop_running = true
   start_status_pulse("green")
-  run_fix_cycle(file_path, 0)
+  run_fix_cycle(file_path, vim.api.nvim_get_current_buf(), 0)
 end
 
 function M.run_refactor()
@@ -900,23 +915,18 @@ function M.run_refactor()
   end
 
   vim.cmd("write")
-  local refactorings = find_refactoring_comments(vim.api.nvim_get_current_buf())
-  if #refactorings == 0 then
-    vim.notify("No refactoring found. Add a // Refactoring: <request> comment to start a refactoring.", vim.log.levels.INFO)
-    return
-  end
-
   local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
-  start_status_pulse("blue", #refactorings)
   capture_failure_for_file(file_path, function(failure, counts)
     if failure then
       loop_running = false
       set_status("red")
       return
     end
-    start_status_pulse("blue", #refactorings)
-    run_refactor_cycle(file_path, bufnr, refactorings, 1)
+    if not start_refactoring_if_present(file_path, bufnr) then
+      loop_running = false
+      vim.notify("No refactoring found. Add a // Refactoring: <request> comment to start a refactoring.", vim.log.levels.INFO)
+    end
   end)
 end
 
