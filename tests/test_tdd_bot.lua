@@ -543,7 +543,7 @@ local function test_tdd_mode_toggles_and_runs_on_save()
   assert(bot._is_mode_enabled(), "expected first TDD command to enable mode")
   assert(not state.valid_windows[off_status.win], "expected off status dot to close when enabling mode")
   assert(#state.status_calls == 2, "expected enabled mode to create a replacement status dot")
-  assert(state.lines_by_buf[status.buf][1] == "● On", "expected enabled status text")
+  assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected enabled status with suite total")
   assert(#state.run_calls == 1, "expected enabling mode to run tests immediately")
 
   save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
@@ -551,7 +551,7 @@ local function test_tdd_mode_toggles_and_runs_on_save()
 
   bot.run_tdd()
   assert(not bot._is_mode_enabled(), "expected second TDD command to disable mode")
-  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected disabled status text")
+  assert(state.lines_by_buf[status.buf][1] == "● Off 1", "expected disabled status to retain suite total")
   save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
   assert(#state.run_calls == 2, "expected disabled mode to ignore saves")
 end
@@ -572,6 +572,23 @@ local function test_tdd_mode_restarts_suite_for_saved_buffer()
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
   assert(#state.run_calls == 2, "expected stale Copilot exit not to start another suite")
+end
+
+local function test_restarted_suite_clears_previous_status_total()
+  reset_state()
+  state.defer_polls = true
+  neotest_mode = "progress"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][1] == "● On 5", "expected discovered suite total before restart")
+
+  save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
+  assert(state.lines_by_buf[status.buf][1] == "● On", "expected replacement suite to clear stale total")
 end
 
 local function test_tdd_mode_setup_replaces_save_handler()
@@ -989,15 +1006,17 @@ local function test_suite_status_shows_live_progress_and_success()
   bot.run_tdd()
 
   local status = state.status_calls[2]
-  assert(state.lines_by_buf[status.buf][1] == "● On", "expected enabled suite status")
+  assert(state.lines_by_buf[status.buf][1] == "● On", "expected unknown suite status before discovery")
   assert(state.lines_by_buf[status.buf][2] == "--/--", "expected unknown suite count before discovery")
   assert(status.opts.height == 2, "expected suite status below mode text")
 
   table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][1] == "● On 5", "expected suite total beside enabled status")
   assert(state.lines_by_buf[status.buf][2] == "2/5...",
     "expected completed suite tests to update live, got " .. tostring(state.lines_by_buf[status.buf][2]))
 
   table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][1] == "● On 5", "expected completed suite total beside enabled status")
   assert(state.lines_by_buf[status.buf][2] == "5 ✓", "expected completed suite to show success check")
 end
 
@@ -1010,6 +1029,7 @@ local function test_suite_status_shows_failure_count()
   bot.run_tdd()
 
   local status = state.status_calls[2]
+  assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected failed suite total beside enabled status")
   assert(state.lines_by_buf[status.buf][2] == "1/1 ✗", "expected failing suite count and failure symbol")
 end
 
@@ -2159,6 +2179,7 @@ test_tdd_mapping_exists()
 test_tdd_mode_is_off_by_default()
 test_tdd_mode_toggles_and_runs_on_save()
 test_tdd_mode_restarts_suite_for_saved_buffer()
+test_restarted_suite_clears_previous_status_total()
 test_tdd_mode_setup_replaces_save_handler()
 test_tdd_saves_buffer_before_running_tests()
 test_tdd_locks_origin_buffer_and_restores_after_recovery()
