@@ -100,6 +100,7 @@ local status_pulse_state = nil
 local status_pulse_bright = true
 local status_pulse_generation = 0
 local status_detail = nil
+local suite_total = nil
 local preferred_model = "auto"
 local saved_models = { "auto" }
 local tdd_mode_enabled = false
@@ -134,6 +135,7 @@ local function clear_status()
   status_pulse_state = nil
   status_pulse_bright = true
   status_detail = nil
+  suite_total = nil
   status_state = nil
 
   if status_winid and vim.api.nvim_win_is_valid(status_winid) then
@@ -151,7 +153,10 @@ local function render_status(state_name, bright, detail)
   local lines = { "● " .. (tdd_mode_enabled and "On" or "Off") }
   if state_name == "blue" and type(detail) == "number" and detail > 0 then
     lines[1] = string.format("%s %d", lines[1], detail)
-  elseif type(detail) == "table" and detail.kind == "suite" then
+  elseif suite_total then
+    lines[1] = string.format("%s %d", lines[1], suite_total)
+  end
+  if type(detail) == "table" and detail.kind == "suite" then
     if detail.failed > 0 then
       lines[2] = string.format("%d/%d ✗", detail.failed, detail.total)
     elseif detail.complete then
@@ -201,6 +206,9 @@ local function set_status(state_name, detail)
   status_pulse_state = nil
   status_pulse_bright = true
   status_detail = detail
+  if type(detail) == "table" and detail.kind == "suite" then
+    suite_total = detail.total > 0 and detail.total or nil
+  end
   render_status(state_name, true, detail)
 end
 
@@ -209,6 +217,9 @@ local function start_status_pulse(state_name, detail)
     return
   end
   status_detail = detail
+  if type(detail) == "table" and detail.kind == "suite" then
+    suite_total = detail.total > 0 and detail.total or nil
+  end
   if status_pulse_state == state_name then
     render_status(state_name, status_pulse_bright, detail)
     return
@@ -1242,6 +1253,7 @@ local function start_tdd_cycle(file_path, bufnr, save_buffer, restart)
   if save_buffer then
     vim.cmd("write")
   end
+  suite_total = nil
   start_status_pulse("green", { kind = "suite", total = 0, completed = 0, failed = 0, complete = false })
   run_fix_cycle(file_path, bufnr, 0, generation)
 end
