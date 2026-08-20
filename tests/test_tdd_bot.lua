@@ -364,14 +364,24 @@ end
 local neotest_mode = "pass"
 local stale_poll_count = 0
 local progress_poll_count = 0
+local fresh_poll_count = 0
+local suite_run_started = false
+local suite_run_poll_count = 0
 
 local function install_neotest()
   stale_poll_count = 0
   progress_poll_count = 0
+  fresh_poll_count = 0
+  suite_run_started = false
+  suite_run_poll_count = 0
   package.loaded["neotest"] = {
     run = {
       run = function(path)
         table.insert(state.run_calls, path)
+        if neotest_mode ~= "never-start" then
+          suite_run_started = true
+          suite_run_poll_count = 0
+        end
       end,
       stop = function()
         state.neotest_stop_calls = (state.neotest_stop_calls or 0) + 1
@@ -385,6 +395,17 @@ local function install_neotest()
         return { "fake" }
       end,
       results = function(adapter_id)
+        if neotest_mode == "stale-then-pass" and stale_poll_count <= 1 then
+          return {
+            ["sample::stale"] = {
+              status = "failed",
+              errors = { { message = "Stale failure" } },
+            },
+          }
+        end
+        if not suite_run_started then
+          return {}
+        end
         if neotest_mode == "mixed-adapters" and adapter_id == "failing" then
           return {
             ["sample::failing"] = {
@@ -401,15 +422,31 @@ local function install_neotest()
             },
           }
         end
+        if neotest_mode == "stale-idle-then-160" and fresh_poll_count < 2 then
+          return {}
+        end
+        if neotest_mode ~= "fail-qf" and neotest_mode ~= "never-start" then
+          return { ["sample::passing"] = { status = "passed" } }
+        end
         return {}
       end,
       status_counts = function(adapter_id)
+        if not suite_run_started then
+          if neotest_mode == "stale-then-pass" then
+            return { running = 0, failed = 1 }
+          end
+          if neotest_mode == "stale-idle-then-160" then
+            return { running = 0, failed = 0, passed = 159, total = 159 }
+          end
+          return { running = 0, failed = 0 }
+        end
         if neotest_mode == "mixed-adapters" then
           if adapter_id == "failing" then
             return { running = 0, failed = 1 }
           end
           return { running = 0, failed = 0, passed = 1 }
         end
+        suite_run_poll_count = suite_run_poll_count + 1
         if neotest_mode == "stale-then-pass" then
           stale_poll_count = stale_poll_count + 1
           -- first poll reflects a leftover failure from a previous, unrelated
@@ -425,6 +462,16 @@ local function install_neotest()
             return { running = 3, passed = 2, failed = 0 }
           end
           return { running = 0, passed = 5, failed = 0 }
+        end
+        if neotest_mode == "stale-idle-then-160" then
+          fresh_poll_count = fresh_poll_count + 1
+          if fresh_poll_count < 2 then
+            return { running = 0, failed = 0, passed = 159, total = 159 }
+          end
+          return { running = 0, failed = 0, passed = 159, total = 160 }
+        end
+        if suite_run_poll_count == 1 then
+          return { running = 1, failed = 0 }
         end
         if neotest_mode == "fail-results" or neotest_mode == "fail-qf" then
           return { running = 0, failed = 1 }
@@ -947,6 +994,41 @@ local function test_stale_failure_from_prior_run_is_ignored()
   assert(#state.job_calls == 0,
     "expected stale failure from a previous, unrelated run to be ignored; got " .. tostring(#state.job_calls) .. " job(s)")
   assert(#state.notify_calls == 0, "expected stale failure recovery to avoid notifications")
+end
+
+local function test_tdd_waits_for_fresh_complete_suite_total()
+  reset_state()
+  state.defer_polls = true
+  neotest_mode = "stale-idle-then-160"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  table.remove(state.deferred_polls, 1)()
+  assert(bot._is_running(), "expected cached idle suite state not to finish the requested run")
+  assert(state.lines_by_buf[status.buf][2] == "159/159...",
+    "expected stale suite count to remain in progress until neotest updates")
+
+  table.remove(state.deferred_polls, 1)()
+  assert(not bot._is_running(), "expected fresh suite state to complete the TDD run")
+  assert(state.lines_by_buf[status.buf][2] == "160 ✓",
+    "expected adapter-reported total to include every discovered test")
+end
+
+local function test_tdd_reports_suite_that_never_starts()
+  reset_state()
+  neotest_mode = "never-start"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup({ result_timeout_ms = 200, poll_interval_ms = 1 })
+  bot.run_tdd()
+
+  assert(#state.run_calls == 1, "expected TDD to force a project suite run")
+  assert(#state.job_calls == 0, "expected an unstarted suite not to launch Copilot")
+  assert(#state.notify_calls == 1 and state.notify_calls[1].msg:find("Timed out waiting", 1, true),
+    "expected a clear error when the requested suite never starts")
 end
 
 local function test_tdd_loop_exposes_plugin_version()
@@ -2073,6 +2155,8 @@ test_suite_status_shows_failure_count()
 test_status_dot_recovers_after_manual_close()
 test_failure_in_any_adapter_beats_passing_adapter()
 test_stale_failure_from_prior_run_is_ignored()
+test_tdd_waits_for_fresh_complete_suite_total()
+test_tdd_reports_suite_that_never_starts()
 test_buffer_lines_synced_from_disk_on_exit()
 test_no_reload_when_mtime_unchanged()
 test_applied_changes_open_in_diff_popup()
