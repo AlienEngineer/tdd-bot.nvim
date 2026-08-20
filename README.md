@@ -10,8 +10,9 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 
 ## Features
 
-- `<leader>tdd` saves current buffer, then runs tests for current file with `neotest`;
-  once green, it applies queued `// Refactoring:` comments
+- `<leader>tdd` saves current buffer, makes it read-only while automated TDD work runs,
+  then restores its prior editability when complete; once green, it applies queued
+  `// Refactoring:` comments
 - shows a compact non-focusable floating status dot that pulses while tests or
   Copilot work is running
 - ignores stale pass/fail state left over from a prior run until the current run is confirmed underway (guards against neotest's cumulative results cache misreporting)
@@ -71,7 +72,7 @@ leader key.
 
 | Mapping | Action |
 | --- | --- |
-| `<leader>tdd` | Save current buffer and run tests for current file. On failure, start a background Copilot fix and rerun tests once it exits. Once tests pass, apply queued `// Refactoring:` comments. |
+| `<leader>tdd` | Save current buffer, make it read-only during automated TDD work, and run tests for current file. On failure, start a background Copilot fix and rerun tests once it exits. Once tests pass, apply queued `// Refactoring:` comments. Previous editability returns after recovery and any queued refactoring review finish. |
 | `<leader>tdc` | Clear stored Copilot session for current file. Next fix starts a fresh Copilot session. |
 | `<leader>tdr` | Save current buffer, then apply every `// Refactoring: <request>` comment through Copilot. Tests must pass before refactoring begins. |
 | `<leader>tdm` | Type model for future tdd-bot Copilot jobs. `auto` is suggested. |

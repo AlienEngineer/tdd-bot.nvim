@@ -91,6 +91,7 @@ local SECURITY_FLAGS = {
 local last_failure = nil
 local copilot_job_id = nil
 local loop_running = false
+local tdd_buffer_lock = nil
 local session_ids = {}
 local status_bufnr = nil
 local status_winid = nil
@@ -227,6 +228,54 @@ local function notify_terminal_failure(message)
   vim.notify("[tdd-bot] " .. message, vim.log.levels.ERROR)
 end
 
+local function is_valid_buffer(bufnr)
+  return vim.api.nvim_buf_is_valid(bufnr)
+end
+
+local function acquire_tdd_buffer_lock(bufnr)
+  if not is_valid_buffer(bufnr) then
+    return
+  end
+  tdd_buffer_lock = {
+    bufnr = bufnr,
+    modifiable = vim.api.nvim_get_option_value("modifiable", { buf = bufnr }),
+  }
+  vim.api.nvim_set_option_value("modifiable", false, { buf = bufnr })
+end
+
+local function release_tdd_buffer_lock()
+  local lock = tdd_buffer_lock
+  tdd_buffer_lock = nil
+  if lock and is_valid_buffer(lock.bufnr) then
+    vim.api.nvim_set_option_value("modifiable", lock.modifiable, { buf = lock.bufnr })
+  end
+end
+
+local function with_tdd_buffer_writable(bufnr, callback)
+  local lock = tdd_buffer_lock
+  if not lock or lock.bufnr ~= bufnr then
+    return callback()
+  end
+  if not is_valid_buffer(bufnr) then
+    return
+  end
+
+  vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
+  local result = callback()
+  if tdd_buffer_lock == lock and is_valid_buffer(bufnr) then
+    vim.api.nvim_set_option_value("modifiable", false, { buf = bufnr })
+  end
+  return result
+end
+
+local function finish_loop(status)
+  loop_running = false
+  release_tdd_buffer_lock()
+  if status then
+    set_status(status)
+  end
+end
+
 local function show_applied_changes(path, diff, work_label)
   local lines = vim.split(diff, "\n", { plain = true })
   if #lines == 0 then
@@ -328,7 +377,9 @@ local function reload_changed_buffers(snapshots, work_label)
     if new_mtime ~= snap.mtime then
       changed[#changed + 1] = path
       local new_lines = vim.fn.readfile(path)
-      vim.api.nvim_buf_set_lines(snap.bufnr, 0, -1, false, new_lines)
+      with_tdd_buffer_writable(snap.bufnr, function()
+        vim.api.nvim_buf_set_lines(snap.bufnr, 0, -1, false, new_lines)
+      end)
       local old_text = table.concat(snap.lines, "\n")
       local new_text = table.concat(new_lines, "\n")
       local diff = vim.diff(old_text, new_text, { result_type = "unified", ctxlen = 3 }) or ""
@@ -771,15 +822,13 @@ local function run_fix_cycle(file_path, bufnr, attempt)
     local failed = counts and counts.failed or 0
     if not failure then
       if not start_refactoring_if_present(file_path, bufnr) then
-        loop_running = false
-        set_status("green")
+        finish_loop("green")
       end
       return
     end
     start_status_pulse("red")
     if attempt >= config.max_retries then
-      loop_running = false
-      set_status("red")
+      finish_loop("red")
       notify_terminal_failure(string.format(
         "Max retries exhausted. Giving up. (%d passed, %d failed)\nLast failure (%s): %s",
         passed, failed, tostring(failure.test_id), tostring(failure.message)))
@@ -789,16 +838,22 @@ local function run_fix_cycle(file_path, bufnr, attempt)
       if launched then
         run_fix_cycle(file_path, bufnr, attempt + 1)
       else
-        loop_running = false
-        set_status("red")
+        finish_loop("red")
       end
     end)
   end)
 end
 
-local function reload_and_format_refactor()
-  vim.cmd("e!")
-  vim.cmd("w")
+local function reload_and_format_refactor(bufnr)
+  with_tdd_buffer_writable(bufnr, function()
+    if not is_valid_buffer(bufnr) then
+      return
+    end
+    vim.api.nvim_buf_call(bufnr, function()
+      vim.cmd("e!")
+      vim.cmd("w")
+    end)
+  end)
 end
 
 local function find_refactoring_comment(bufnr, text, occurrence)
@@ -816,13 +871,18 @@ end
 
 local function restore_refactoring_snapshot(file_path, bufnr, disk_lines, buffer_lines)
   vim.fn.writefile(disk_lines, file_path)
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, buffer_lines)
+  with_tdd_buffer_writable(bufnr, function()
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, buffer_lines)
+  end)
 end
 
 local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   if index > #refactorings then
-    loop_running = false
-    set_status("green")
+    finish_loop("green")
+    return
+  end
+  if not is_valid_buffer(bufnr) then
+    finish_loop("red")
     return
   end
 
@@ -834,8 +894,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   end
   local refactor = find_refactoring_comment(bufnr, refactorings[index].text, occurrence)
   if not refactor then
-    loop_running = false
-    set_status("red")
+    finish_loop("red")
     notify_terminal_failure("Queued refactoring comment no longer exists: " .. refactorings[index].text)
     return
   end
@@ -847,8 +906,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
     text = refactor.text,
   }, function(launched, candidate)
     if not launched then
-      loop_running = false
-      set_status("red")
+      finish_loop("red")
       return
     end
 
@@ -856,13 +914,15 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
     local new_text = table.concat(candidate.candidate_lines, "\n")
     local diff = vim.diff(old_text, new_text, { result_type = "unified", ctxlen = 3 }) or ""
     show_refactoring_review(file_path, diff, refactor.text, function()
-      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, candidate.candidate_lines)
-      reload_and_format_refactor()
+      with_tdd_buffer_writable(bufnr, function()
+        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, candidate.candidate_lines)
+      end)
+      reload_and_format_refactor(bufnr)
       capture_failure_for_file(file_path, function(failure, counts)
         if failure then
           set_status("red")
           restore_refactoring_snapshot(file_path, bufnr, candidate.disk_lines, pre_lines)
-          loop_running = false
+          finish_loop("red")
           return
         end
         start_status_pulse("blue", #refactorings - index)
@@ -899,9 +959,11 @@ function M.run_tdd()
   end
 
   vim.cmd("write")
+  local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
+  acquire_tdd_buffer_lock(bufnr)
   start_status_pulse("green")
-  run_fix_cycle(file_path, vim.api.nvim_get_current_buf(), 0)
+  run_fix_cycle(file_path, bufnr, 0)
 end
 
 function M.run_refactor()
@@ -919,12 +981,11 @@ function M.run_refactor()
   loop_running = true
   capture_failure_for_file(file_path, function(failure, counts)
     if failure then
-      loop_running = false
-      set_status("red")
+      finish_loop("red")
       return
     end
     if not start_refactoring_if_present(file_path, bufnr) then
-      loop_running = false
+      finish_loop()
       vim.notify("No refactoring found. Add a // Refactoring: <request> comment to start a refactoring.", vim.log.levels.INFO)
     end
   end)
