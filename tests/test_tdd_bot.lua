@@ -62,6 +62,8 @@ local real = {
   nvim_set_option_value = vim.api.nvim_set_option_value,
   readfile = vim.fn.readfile,
   writefile = vim.fn.writefile,
+  delete = vim.fn.delete,
+  globpath = vim.fn.globpath,
   executable = vim.fn.executable,
   fnamemodify = vim.fn.fnamemodify,
   getqflist = vim.fn.getqflist,
@@ -230,6 +232,30 @@ vim.fn.writefile = function(lines, path)
   return 0
 end
 
+vim.fn.delete = function(path)
+  state.file_contents[path] = nil
+  state.mtimes[path] = nil
+  return 0
+end
+
+vim.fn.globpath = function(root, _, _, _)
+  local paths = { "/tmp/sample_test.dart" }
+  local seen = { ["/tmp/sample_test.dart"] = true }
+  for path in pairs(state.file_contents) do
+    if path:sub(1, #root + 1) == root .. "/" and not seen[path] then
+      paths[#paths + 1] = path
+      seen[path] = true
+    end
+  end
+  for path in pairs(state.mtimes) do
+    if path:sub(1, #root + 1) == root .. "/" and not seen[path] then
+      paths[#paths + 1] = path
+      seen[path] = true
+    end
+  end
+  return paths
+end
+
 vim.fn.executable = function(bin)
   if bin == "copilot" then
     return state.copilot_exists and 1 or 0
@@ -280,7 +306,7 @@ vim.uv.fs_stat = function(path)
     return { mtime = { sec = 1 } }
   end
   local mt = state.mtimes[path] or nil
-  if mt then return { mtime = { sec = mt } } end
+  if mt or state.file_contents[path] then return { type = "file", mtime = { sec = mt or 1 } } end
   return nil
 end
 
@@ -1579,49 +1605,107 @@ local function test_refactor_aborts_when_tests_red()
   assert(#state.notify_calls == 0, "expected red pre-check to avoid notifications")
 end
 
-local function test_refactor_reverts_when_refactoring_breaks_tests()
+local function test_refactor_repairs_related_source_and_tests()
   reset_state()
   neotest_mode = "pass"
   install_neotest()
   local pre_lines = {
     "local x = 1",
     "// Refactoring: extract this into a helper function",
-    "local y = 2",
-    "// Refactoring: rename y to total",
   }
   state.buf_lines[current_buf] = pre_lines
   state.file_contents["/tmp/sample_test.dart"] = pre_lines
+  state.open_bufs[2] = "/tmp/related_test.dart"
+  state.buf_lines[2] = { "assert(old_value)" }
+  state.file_contents["/tmp/related_test.dart"] = { "assert(broken_value)" }
   local bot = load_bot()
   bot.setup()
   bot.run_refactor()
 
-  assert(#state.job_calls == 1, "expected first refactoring job to start once tests confirmed green")
-  local status = state.status_calls[1]
-  assert(state.lines_by_buf[status.buf][1] == "● Off 2", "expected both refactorings in initial pending count")
-
-  -- Accepted first refactoring breaks tests.
   state.file_contents["/tmp/sample_test.dart"] = {
-    "broken",
-    "local y = 2",
-    "// Refactoring: rename y to total",
+    "local function extracted() return 1 end",
   }
+  state.file_contents["/tmp/related_test.dart"] = { "assert(old_value)" }
+  neotest_mode = "fail-results"
+  state.job_calls[1].opts.on_exit(1, 0)
+  local first_review = table.concat(state.popup_buffers[state.popup_calls[1].buf], "\n")
+  assert(first_review:find("/tmp/sample_test.dart", 1, true) and first_review:find("/tmp/related_test.dart", 1, true),
+    "expected combined review to include source and related test files")
+  popup_mapping(state.popup_calls[1], "a")()
+
+  assert(#state.job_calls == 2, "expected failed verification to start repair job")
+  local repair_prompt = arg_after(state.job_calls[2].cmd, "-p")
+  assert(repair_prompt:find("extract this into a helper function", 1, true)
+      and repair_prompt:find("Expected true got false", 1, true),
+    "expected repair prompt to contain refactoring and failure")
+
+  state.file_contents["/tmp/related_test.dart"] = { "assert(extracted() == 1)" }
+  neotest_mode = "pass"
+  state.job_calls[2].opts.on_exit(2, 0)
+  popup_mapping(state.popup_calls[2], "a")()
+
+  assert(not bot._is_running(), "expected repaired refactoring to complete")
+  assert(state.file_contents["/tmp/sample_test.dart"][1] == "local function extracted() return 1 end",
+    "expected repaired source retained")
+  assert(state.file_contents["/tmp/related_test.dart"][1] == "assert(extracted() == 1)",
+    "expected repaired test retained")
+  assert(state.buf_lines[2][1] == "assert(extracted() == 1)", "expected loaded related test buffer synced")
+end
+
+local function test_refactor_rejection_restores_all_workspace_changes()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local original = { "// Refactoring: rename helper" }
+  state.buf_lines[current_buf] = original
+  state.file_contents["/tmp/sample_test.dart"] = original
+  state.file_contents["/tmp/related_test.dart"] = { "old test" }
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "renamed helper" }
+  state.file_contents["/tmp/related_test.dart"] = { "new test" }
+  state.file_contents["/tmp/new_helper.dart"] = { "new file" }
+  state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "r")()
+
+  assert(state.file_contents["/tmp/sample_test.dart"][1] == original[1], "expected source restored on rejection")
+  assert(state.file_contents["/tmp/related_test.dart"][1] == "old test", "expected test restored on rejection")
+  assert(state.file_contents["/tmp/new_helper.dart"] == nil, "expected new candidate file removed on rejection")
+  assert(not bot._is_running(), "expected rejected final refactoring to complete queue")
+end
+
+local function test_refactor_repair_limit_restores_workspace()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local original = { "// Refactoring: rename helper" }
+  state.buf_lines[current_buf] = original
+  state.file_contents["/tmp/sample_test.dart"] = original
+  state.file_contents["/tmp/related_test.dart"] = { "old test" }
+  local bot = load_bot()
+  bot.setup({ max_refactor_retries = 1 })
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "broken source" }
+  state.file_contents["/tmp/related_test.dart"] = { "broken test" }
+  state.file_contents["/tmp/new_helper.dart"] = { "new file" }
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
   popup_mapping(state.popup_calls[1], "a")()
+  assert(#state.job_calls == 2, "expected one repair attempt")
 
-  assert(#state.job_calls == 1, "expected loop to stop, no second refactoring job started")
-  assert(not bot._is_running(), "expected refactor loop to stop running after a revert")
-  assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected failed refactoring to show red status")
-  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected red status to hide remaining pending count")
+  state.file_contents["/tmp/related_test.dart"] = { "still broken test" }
+  state.job_calls[2].opts.on_exit(2, 0)
+  popup_mapping(state.popup_calls[2], "a")()
 
-  local path = "/tmp/sample_test.dart"
-  for i, line in ipairs(pre_lines) do
-    assert(state.file_contents[path][i] == line, "expected file reverted to pre-refactoring content on disk")
-    assert(state.lines_by_buf[current_buf][i] == line, "expected buffer reverted to pre-refactoring content")
-  end
-
-  assert(state.valid_windows[status.win], "expected status dot to remain visible after reverting")
-  assert(#state.notify_calls == 0, "expected reverted refactor to avoid notifications")
+  assert(#state.job_calls == 2 and not bot._is_running(), "expected retry limit to stop refactoring")
+  assert(state.file_contents["/tmp/sample_test.dart"][1] == original[1], "expected source restored after exhausted repairs")
+  assert(state.file_contents["/tmp/related_test.dart"][1] == "old test", "expected test restored after exhausted repairs")
+  assert(state.file_contents["/tmp/new_helper.dart"] == nil, "expected new file removed after exhausted repairs")
+  assert(#state.notify_calls == 1 and state.notify_calls[1].msg:find("retries exhausted", 1, true),
+    "expected one terminal refactoring failure notification")
 end
 
 local function test_clear_session_removes_stored_uuid()
@@ -1771,7 +1855,9 @@ test_closing_refactoring_review_rejects_candidate()
 test_refactor_status_transitions_from_blue_to_red_or_green()
 test_refactor_no_comments_found()
 test_refactor_aborts_when_tests_red()
-test_refactor_reverts_when_refactoring_breaks_tests()
+test_refactor_repairs_related_source_and_tests()
+test_refactor_rejection_restores_all_workspace_changes()
+test_refactor_repair_limit_restores_workspace()
 test_clear_session_removes_stored_uuid()
 test_clear_session_avoids_notification_when_nothing_to_clear()
 test_readme_guides_user_from_purpose_to_installation_and_keymaps()
@@ -1803,6 +1889,8 @@ vim.api.nvim_buf_add_highlight = real.nvim_buf_add_highlight
 vim.api.nvim_set_option_value = real.nvim_set_option_value
 vim.fn.readfile = real.readfile
 vim.fn.writefile = real.writefile
+vim.fn.delete = real.delete
+vim.fn.globpath = real.globpath
 vim.fn.executable = real.executable
 vim.fn.fnamemodify = real.fnamemodify
 vim.fn.getqflist = real.getqflist

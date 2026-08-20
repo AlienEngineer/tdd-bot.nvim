@@ -11,6 +11,7 @@ local config = {
   result_timeout_ms = 120000,
   poll_interval_ms = 200,
   max_retries = 5,
+  max_refactor_retries = 5,
   copilot_cmd = {
     "copilot",
   },
@@ -267,6 +268,18 @@ local function show_applied_changes(path, diff, work_label)
   vim.keymap.set("n", "<Esc>", close_popup, { buffer = buf, silent = true })
 end
 
+local function same_lines(left, right)
+  if #left ~= #right then
+    return false
+  end
+  for index, line in ipairs(left) do
+    if line ~= right[index] then
+      return false
+    end
+  end
+  return true
+end
+
 local function show_refactoring_review(path, diff, work_label, on_accept, on_reject)
   local lines = vim.split(diff, "\n", { plain = true })
   if #lines == 0 then
@@ -363,9 +376,7 @@ local function find_project_root(file_path)
   local current = dir
   for _ = 1, 20 do
     for _, marker in ipairs(markers) do
-      local candidate = current .. "/" .. marker
-      local stat = (vim.uv or vim.loop).fs_stat(candidate)
-      if stat then
+      if (vim.uv or vim.loop).fs_stat(current .. "/" .. marker) then
         return current
       end
     end
@@ -374,6 +385,116 @@ local function find_project_root(file_path)
     current = parent
   end
   return dir
+end
+
+local function is_project_file(root, path)
+  return path:sub(1, #root) == root
+    and not path:find("/.git/", 1, true)
+    and not path:find("/node_modules/", 1, true)
+    and path ~= root .. "/.git"
+end
+
+local function snapshot_workspace(root)
+  local snapshot = {}
+  for _, path in ipairs(vim.fn.globpath(root, "**/*", false, true)) do
+    local stat = (vim.uv or vim.loop).fs_stat(path)
+    if stat and stat.type == "file" and is_project_file(root, path) then
+      snapshot[path] = { exists = true, lines = vim.fn.readfile(path) }
+    end
+  end
+  return snapshot
+end
+
+local function workspace_candidate(root, snapshot)
+  local current, paths, changes = snapshot_workspace(root), {}, {}
+  for path in pairs(snapshot) do paths[path] = true end
+  for path in pairs(current) do paths[path] = true end
+  for path in pairs(paths) do
+    local before, after = snapshot[path] or { exists = false, lines = {} }, current[path] or { exists = false, lines = {} }
+    if before.exists ~= after.exists or not same_lines(before.lines, after.lines) then
+      changes[path] = { before = before, after = after }
+    end
+  end
+  return changes
+end
+
+local function candidate_diff(changes)
+  local paths, parts = {}, {}
+  for path in pairs(changes) do paths[#paths + 1] = path end
+  table.sort(paths)
+  for _, path in ipairs(paths) do
+    local change = changes[path]
+    local diff = vim.diff(table.concat(change.before.lines, "\n"), table.concat(change.after.lines, "\n"), { result_type = "unified", ctxlen = 3 }) or ""
+    parts[#parts + 1], parts[#parts + 1] = "--- " .. path, "+++ " .. path
+    if diff ~= "" then parts[#parts + 1] = diff end
+  end
+  return table.concat(parts, "\n")
+end
+
+local function merge_candidate_changes(original, additions)
+  for path, addition in pairs(additions) do
+    local existing = original[path]
+    if existing then
+      existing.after = addition.after
+      if existing.before.exists == existing.after.exists and same_lines(existing.before.lines, existing.after.lines) then
+        original[path] = nil
+      end
+    else
+      original[path] = addition
+    end
+  end
+end
+
+local function buffers_by_path()
+  local buffers = {}
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      local path = vim.api.nvim_buf_get_name(bufnr)
+      if path and path ~= "" then
+        buffers[path] = bufnr
+      end
+    end
+  end
+  return buffers
+end
+
+local function sync_candidate_buffers(changes)
+  local buffers = buffers_by_path()
+  for path, change in pairs(changes) do
+    if buffers[path] then
+      vim.api.nvim_buf_set_lines(buffers[path], 0, -1, false, change.after.lines)
+    end
+  end
+end
+
+local function restore_workspace_candidate(changes)
+  local buffers, conflicts = buffers_by_path(), {}
+  for path, change in pairs(changes) do
+    local current_exists = (vim.uv or vim.loop).fs_stat(path) ~= nil
+    local current_lines = current_exists and vim.fn.readfile(path) or {}
+    if current_exists ~= change.after.exists or not same_lines(current_lines, change.after.lines) then
+      conflicts[#conflicts + 1] = path
+    elseif change.before.exists then
+      vim.fn.writefile(change.before.lines, path)
+      if buffers[path] then
+        vim.api.nvim_buf_set_lines(buffers[path], 0, -1, false, change.before.lines)
+      end
+    else
+      vim.fn.delete(path)
+      if buffers[path] then
+        vim.api.nvim_buf_set_lines(buffers[path], 0, -1, false, {})
+      end
+    end
+  end
+  return conflicts
+end
+
+local function notify_restore_conflicts(conflicts)
+  if #conflicts > 0 then
+    vim.notify(
+      "Refactoring rollback skipped concurrent edits: " .. table.concat(conflicts, ", "),
+      vim.log.levels.WARN)
+  end
 end
 
 local function build_copilot_prompt(context)
@@ -390,11 +511,26 @@ end
 local function build_refactor_prompt(context)
   return table.concat({
     "Apply the following refactoring exactly as described, with minimal unrelated changes.",
-    "Apply the change directly to the file using your tools.",
+    "Inspect and change every related project file required, including affected tests.",
     "Once applied, remove the refactoring comment that requested it.",
+    "Run relevant tests before finishing.",
     "File: " .. context.file_path,
     "Line: " .. tostring(context.line),
     "Refactoring: " .. context.text,
+  }, "\n")
+end
+
+local function build_refactor_repair_prompt(context, failure)
+  return table.concat({
+    "Finish this refactoring. Previous candidate failed verification.",
+    "Make minimal related implementation and test changes needed to pass.",
+    "Keep requested refactoring and remove its comment.",
+    "Run relevant tests before finishing.",
+    "File: " .. context.file_path,
+    "Refactoring: " .. context.text,
+    "Failing test: " .. tostring(failure.test_id),
+    "Failure output:",
+    tostring(failure.message),
   }, "\n")
 end
 
@@ -700,8 +836,8 @@ local function run_copilot_job(context, prompt, on_done, review)
 
   local work_label = context.test_id or context.text or "current work"
   local snapshots = snapshot_open_buffers()
-  local disk_lines = review and vim.fn.readfile(context.file_path) or nil
   local cwd = find_project_root(context.file_path)
+  local workspace_snapshot = review and snapshot_workspace(cwd) or nil
   local function start_job(model)
     local output = {}
     local job_id = vim.fn.jobstart(build_copilot_cmd(context, prompt, model), {
@@ -730,8 +866,7 @@ local function run_copilot_job(context, prompt, on_done, review)
         end
         if review then
           on_done(true, {
-            disk_lines = disk_lines,
-            candidate_lines = vim.fn.readfile(context.file_path),
+            changes = workspace_candidate(cwd, workspace_snapshot),
           })
         else
           reload_changed_buffers(snapshots, work_label)
@@ -763,6 +898,10 @@ local function start_copilot_refactor(refactor, on_done)
     prompt,
     on_done,
     true)
+end
+
+local function start_copilot_refactor_repair(refactor, failure, on_done)
+  run_copilot_job(refactor, build_refactor_repair_prompt(refactor, failure), on_done, true)
 end
 
 local start_refactoring_if_present
@@ -816,11 +955,6 @@ local function find_refactoring_comment(bufnr, text, occurrence)
   return nil
 end
 
-local function restore_refactoring_snapshot(file_path, bufnr, disk_lines, buffer_lines)
-  vim.fn.writefile(disk_lines, file_path)
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, buffer_lines)
-end
-
 local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   if index > #refactorings then
     loop_running = false
@@ -841,30 +975,47 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
     notify_terminal_failure("Queued refactoring comment no longer exists: " .. refactorings[index].text)
     return
   end
-  local pre_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-
-  start_copilot_refactor({
+  local context = {
     file_path = file_path,
     line = refactor.line,
     text = refactor.text,
-  }, function(launched, candidate)
+  }
+  local candidate_state = nil
+  local function review_candidate(launched, candidate, repair_attempt)
     if not launched then
+      if candidate_state then
+        notify_restore_conflicts(restore_workspace_candidate(candidate_state.changes))
+      end
       loop_running = false
       set_status("red")
       return
     end
 
-    local old_text = table.concat(candidate.disk_lines, "\n")
-    local new_text = table.concat(candidate.candidate_lines, "\n")
-    local diff = vim.diff(old_text, new_text, { result_type = "unified", ctxlen = 3 }) or ""
+    if candidate_state then
+      merge_candidate_changes(candidate_state.changes, candidate.changes)
+    else
+      candidate_state = candidate
+    end
+    local diff = candidate_diff(candidate_state.changes)
     show_refactoring_review(file_path, diff, refactor.text, function()
-      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, candidate.candidate_lines)
+      sync_candidate_buffers(candidate_state.changes)
       reload_and_format_refactor()
       capture_failure_for_file(file_path, bufnr, function(failure, counts)
         if failure then
-          set_status("red")
-          restore_refactoring_snapshot(file_path, bufnr, candidate.disk_lines, pre_lines)
-          loop_running = false
+          start_status_pulse("red")
+          if repair_attempt >= config.max_refactor_retries then
+            local conflicts = restore_workspace_candidate(candidate_state.changes)
+            loop_running = false
+            set_status("red")
+            local conflict_message = #conflicts > 0 and ("\nUnrestored concurrent edits: " .. table.concat(conflicts, ", ")) or ""
+            notify_terminal_failure(string.format(
+              "Refactoring retries exhausted after %d repairs.\nLast failure (%s): %s%s",
+              repair_attempt, tostring(failure.test_id), tostring(failure.message), conflict_message))
+            return
+          end
+          start_copilot_refactor_repair(context, failure, function(repair_launched, repaired_candidate)
+            review_candidate(repair_launched, repaired_candidate, repair_attempt + 1)
+          end)
           return
         end
         start_status_pulse("blue", #refactorings - index)
@@ -872,10 +1023,13 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
       end)
     end, function()
       refactorings[index].rejected = true
-      restore_refactoring_snapshot(file_path, bufnr, candidate.disk_lines, pre_lines)
+      notify_restore_conflicts(restore_workspace_candidate(candidate_state.changes))
       start_status_pulse("blue", #refactorings - index)
       run_refactor_cycle(file_path, bufnr, refactorings, index + 1)
     end)
+  end
+  start_copilot_refactor(context, function(launched, candidate)
+    review_candidate(launched, candidate, 0)
   end)
 end
 
@@ -985,6 +1139,9 @@ function M.setup(opts)
     end
     if type(opts.max_retries) == "number" and opts.max_retries >= 0 then
       config.max_retries = math.floor(opts.max_retries)
+    end
+    if type(opts.max_refactor_retries) == "number" and opts.max_refactor_retries >= 0 then
+      config.max_refactor_retries = math.floor(opts.max_refactor_retries)
     end
     if type(opts.copilot_cmd) == "table" and #opts.copilot_cmd > 0 then
       config.copilot_cmd = opts.copilot_cmd
