@@ -364,6 +364,7 @@ end
 local neotest_mode = "pass"
 local stale_poll_count = 0
 local progress_poll_count = 0
+local buffer_progress_poll_count = 0
 local fresh_poll_count = 0
 local suite_run_started = false
 local suite_run_poll_count = 0
@@ -371,6 +372,7 @@ local suite_run_poll_count = 0
 local function install_neotest()
   stale_poll_count = 0
   progress_poll_count = 0
+  buffer_progress_poll_count = 0
   fresh_poll_count = 0
   suite_run_started = false
   suite_run_poll_count = 0
@@ -422,6 +424,14 @@ local function install_neotest()
             },
           }
         end
+        if neotest_mode == "buffer-failure" then
+          return {
+            ["sample::failing"] = {
+              status = "failed",
+              errors = { { message = "Expected true got false" } },
+            },
+          }
+        end
         if neotest_mode == "stale-idle-then-160" and fresh_poll_count < 2 then
           return {}
         end
@@ -465,13 +475,30 @@ local function install_neotest()
         end
         if neotest_mode == "buffer-progress" then
           if adapter_id == "fake" and args and args.buffer == current_buf then
-            progress_poll_count = progress_poll_count + 1
-            if progress_poll_count == 1 then
+            buffer_progress_poll_count = buffer_progress_poll_count + 1
+            if buffer_progress_poll_count == 1 then
               return { running = 1, passed = 1, failed = 0, total = 2 }
             end
             return { running = 0, passed = 2, failed = 0, total = 2 }
           end
+          progress_poll_count = progress_poll_count + 1
+          if progress_poll_count == 1 then
+            return { running = 4, passed = 1, failed = 0, total = 5 }
+          end
           return { running = 0, passed = 5, failed = 0, total = 5 }
+        end
+        if neotest_mode == "saved-buffer-progress" then
+          if args and args.buffer then
+            local total = args.buffer == 2 and 3 or 2
+            return { running = 0, passed = total, failed = 0, total = total }
+          end
+          return { running = 0, passed = 5, failed = 0, total = 5 }
+        end
+        if neotest_mode == "buffer-failure" then
+          if args and args.buffer == current_buf then
+            return { running = 0, passed = 2, failed = 0, total = 2 }
+          end
+          return { running = 0, passed = 2, failed = 3, total = 5 }
         end
         if neotest_mode == "stale-idle-then-160" then
           fresh_poll_count = fresh_poll_count + 1
@@ -604,6 +631,25 @@ local function test_tdd_mode_restarts_suite_for_saved_buffer()
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
   assert(#state.run_calls == 2, "expected stale Copilot exit not to start another suite")
+end
+
+local function test_saved_buffer_updates_status_buffer_total()
+  reset_state()
+  neotest_mode = "saved-buffer-progress"
+  state.open_bufs[2] = "/tmp/other_test.dart"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  assert(state.lines_by_buf[status.buf][1] == "● On 2",
+    "expected initial status count from the current buffer")
+  save_handler()({ buf = 2, file = "/tmp/other_test.dart" })
+  assert(state.lines_by_buf[status.buf][1] == "● On 3",
+    "expected saved buffer status count after restarting the solution suite")
+  assert(state.lines_by_buf[status.buf][2] == "5 ✓",
+    "expected saved-buffer run to retain the whole-solution result")
 end
 
 local function test_restarted_suite_clears_previous_status_total()
@@ -964,7 +1010,7 @@ local function test_suite_status_shows_failure_count()
   assert(state.lines_by_buf[status.buf][2] == "1/1 ✗", "expected failing suite count and failure symbol")
 end
 
-local function test_suite_status_shows_only_current_buffer_total()
+local function test_suite_status_separates_current_buffer_and_solution_counts()
   reset_state()
   state.defer_polls = true
   neotest_mode = "buffer-progress"
@@ -977,14 +1023,29 @@ local function test_suite_status_shows_only_current_buffer_total()
   table.remove(state.deferred_polls, 1)()
   assert(state.lines_by_buf[status.buf][1] == "● On 2",
     "expected status total to include only tests in the current buffer")
-  assert(state.lines_by_buf[status.buf][2] == "1/2...",
-    "expected progress to include only tests in the current buffer")
+  assert(state.lines_by_buf[status.buf][2] == "1/5...",
+    "expected progress to include every test in the solution")
 
   table.remove(state.deferred_polls, 1)()
   assert(state.lines_by_buf[status.buf][1] == "● On 2",
     "expected completed status total to include only tests in the current buffer")
-  assert(state.lines_by_buf[status.buf][2] == "2 ✓",
-    "expected completed count to include only tests in the current buffer")
+  assert(state.lines_by_buf[status.buf][2] == "5 ✓",
+    "expected completed count to include every test in the solution")
+end
+
+local function test_suite_failure_keeps_buffer_total_above_solution_failure()
+  reset_state()
+  neotest_mode = "buffer-failure"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  assert(state.lines_by_buf[status.buf][1] == "● On 2",
+    "expected current buffer total beside the status dot after a suite failure")
+  assert(state.lines_by_buf[status.buf][2] == "3/5 ✗",
+    "expected failure count to include every test in the solution")
 end
 
 local function test_status_dot_recovers_after_manual_close()
@@ -1071,7 +1132,7 @@ local function test_tdd_loop_exposes_plugin_version()
   bot.setup()
   bot.run_tdd()
 
-  assert(bot.version == "0.1.14", "expected public plugin version")
+  assert(bot.version == "0.1.15", "expected public plugin version")
   assert(#state.notify_calls == 0, "expected loop start to avoid notifications")
 end
 
@@ -2124,7 +2185,7 @@ local function test_readme_guides_user_from_purpose_to_installation_and_keymaps(
   assert(readme:find("<leader>tdc", 1, true), "expected clear-session keymap")
   assert(readme:find("<leader>tdr", 1, true), "expected refactor keymap")
   assert(readme:find("<leader>tdm", 1, true), "expected model selector keymap")
-  assert(readme:find("live whole-suite progress", 1, true), "expected suite status indicator documentation")
+  assert(readme:find("live whole-solution progress", 1, true), "expected solution status indicator documentation")
   assert(readme:find("mode defaults to Off", 1, true), "expected TDD mode default documentation")
   assert(readme:find("every file save", 1, true), "expected save-triggered TDD documentation")
 end
@@ -2168,6 +2229,7 @@ test_tdd_mapping_exists()
 test_tdd_mode_is_off_by_default()
 test_tdd_mode_toggles_and_runs_on_save()
 test_tdd_mode_restarts_suite_for_saved_buffer()
+test_saved_buffer_updates_status_buffer_total()
 test_restarted_suite_clears_previous_status_total()
 test_tdd_mode_setup_replaces_save_handler()
 test_tdd_saves_buffer_before_running_tests()
@@ -2185,7 +2247,8 @@ test_tdd_starts_refactoring_queue_after_fix_recovery()
 test_status_dot_reflects_confirmed_tdd_results()
 test_suite_status_shows_live_progress_and_success()
 test_suite_status_shows_failure_count()
-test_suite_status_shows_only_current_buffer_total()
+test_suite_status_separates_current_buffer_and_solution_counts()
+test_suite_failure_keeps_buffer_total_above_solution_failure()
 test_status_dot_recovers_after_manual_close()
 test_failure_in_any_adapter_beats_passing_adapter()
 test_stale_failure_from_prior_run_is_ignored()

@@ -13,7 +13,7 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - `<leader>tdd` toggles TDD mode, off by default; enabling it saves current
   buffer and runs the project suite, then repeats that suite cycle after every file save
 - shows a compact non-focusable floating status with `On`/`Off` mode text, the
-  known whole-suite total beside it, and live whole-suite progress; it pulses
+  current buffer's test total beside it, and live whole-solution progress below it; it pulses
   while tests or Copilot work is running
 - ignores stale pass/fail state left over from a prior run until the current run is confirmed underway (guards against neotest's cumulative results cache misreporting)
 - on failure, runs Copilot non-interactive fix in background, resuming the same Copilot session for that file across retries/reruns (per-file, in-memory only, not persisted across Neovim restarts)
@@ -30,8 +30,8 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - rejected changes restore every candidate file to pre-refactoring content; queue advances only after accept or reject
 - failed accepted refactorings start bounded Copilot repair iterations. Exhaustion restores candidate workspace and stops loop
 - a compact, non-focusable floating status pulses green while TDD tests run, red
-  during failure recovery, and blue during refactoring. The known suite total
-  appears beside `On`/`Off`; green test progress shows `completed/total...`,
+  during failure recovery, and blue during refactoring. The current buffer's test
+  total appears beside `On`/`Off`; green whole-solution progress shows `completed/total...`,
   completed suites show `total ✓`, and failures show `failed/total ✗`; blue shows remaining
   refactoring count, which decreases after each verified refactoring and hides
   when complete; completed loops leave a static green or red dot
@@ -89,9 +89,9 @@ leader key.
 6. When tests are green, queued `// Refactoring:` comments enter blue review mode;
    without comments, TDD finishes with static green status.
 
-The floating status shows `On` or `Off` and, once discovered, the whole-suite
-total in the top-right corner. TDD mode defaults to Off.
-A second line shows `--/total` until suite progress is known,
+The floating status shows `On` or `Off` and, once discovered, the current
+buffer's test total in the top-right corner. TDD mode defaults to Off.
+A second line shows `--/--` until whole-solution progress is known,
 then green `completed/total...` while it runs. A passing suite settles on green
 `total ✓`; a failing suite shows red `failed/total ✗`. Blue refactoring status
 continues to show its remaining refactoring count. Saving during any active TDD

@@ -1,5 +1,5 @@
 local M = {}
-local VERSION = "0.1.14"
+local VERSION = "0.1.15"
 
 M.version = VERSION
 
@@ -100,7 +100,8 @@ local status_pulse_state = nil
 local status_pulse_bright = true
 local status_pulse_generation = 0
 local status_detail = nil
-local suite_total = nil
+local buffer_total = nil
+local solution_total = nil
 local preferred_model = "auto"
 local saved_models = { "auto" }
 local tdd_mode_enabled = false
@@ -135,7 +136,8 @@ local function clear_status()
   status_pulse_state = nil
   status_pulse_bright = true
   status_detail = nil
-  suite_total = nil
+  buffer_total = nil
+  solution_total = nil
   status_state = nil
 
   if status_winid and vim.api.nvim_win_is_valid(status_winid) then
@@ -153,16 +155,17 @@ local function render_status(state_name, bright, detail)
   local lines = { "● " .. (tdd_mode_enabled and "On" or "Off") }
   if state_name == "blue" and type(detail) == "number" and detail > 0 then
     lines[1] = string.format("%s %d", lines[1], detail)
-  elseif suite_total then
-    lines[1] = string.format("%s %d", lines[1], suite_total)
+  elseif buffer_total then
+    lines[1] = string.format("%s %d", lines[1], buffer_total)
   end
   if type(detail) == "table" and detail.kind == "suite" then
+    local total = solution_total or detail.total
     if detail.failed > 0 then
-      lines[2] = string.format("%d/%d ✗", detail.failed, detail.total)
+      lines[2] = string.format("%d/%d ✗", detail.failed, total)
     elseif detail.complete then
-      lines[2] = string.format("%d ✓", detail.total)
-    elseif detail.total > 0 then
-      lines[2] = string.format("%s/%d...", detail.completed > 0 and detail.completed or "--", detail.total)
+      lines[2] = string.format("%d ✓", total)
+    elseif total > 0 then
+      lines[2] = string.format("%s/%d...", detail.completed > 0 and detail.completed or "--", total)
     else
       lines[2] = "--/--"
     end
@@ -207,7 +210,8 @@ local function set_status(state_name, detail)
   status_pulse_bright = true
   status_detail = detail
   if type(detail) == "table" and detail.kind == "suite" then
-    suite_total = detail.total > 0 and detail.total or nil
+    buffer_total = detail.buffer_total > 0 and detail.buffer_total or nil
+    solution_total = detail.total > 0 and detail.total or nil
   end
   render_status(state_name, true, detail)
 end
@@ -218,7 +222,8 @@ local function start_status_pulse(state_name, detail)
   end
   status_detail = detail
   if type(detail) == "table" and detail.kind == "suite" then
-    suite_total = detail.total > 0 and detail.total or nil
+    buffer_total = detail.buffer_total > 0 and detail.buffer_total or nil
+    solution_total = detail.total > 0 and detail.total or nil
   end
   if status_pulse_state == state_name then
     render_status(state_name, status_pulse_bright, detail)
@@ -765,7 +770,12 @@ local function collect_suite_state(neotest, bufnr)
 
   for _, adapter_id in ipairs(neotest.state.adapter_ids() or {}) do
     if neotest.state.status_counts then
-      local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id, { buffer = bufnr })
+      local ok_counts, counts
+      if bufnr then
+        ok_counts, counts = pcall(neotest.state.status_counts, adapter_id, { buffer = bufnr })
+      else
+        ok_counts, counts = pcall(neotest.state.status_counts, adapter_id)
+      end
       if ok_counts and type(counts) == "table" then
         for _, status in ipairs({ "passed", "failed", "skipped", "running" }) do
           local count = counts[status]
@@ -847,7 +857,7 @@ local function capture_suite_failure(file_path, bufnr, done, generation)
 
   last_failure = nil
   local root = find_project_root(file_path)
-  local previous = collect_suite_state(neotest, bufnr)
+  local previous = collect_suite_state(neotest)
   local run_ok = pcall(neotest.run.run, root)
   if not run_ok then
     done({
@@ -875,7 +885,8 @@ local function capture_suite_failure(file_path, bufnr, done, generation)
     if generation and generation ~= tdd_run_generation then
       return
     end
-    local current = collect_suite_state(neotest, bufnr)
+    local current = collect_suite_state(neotest)
+    local buffer = collect_suite_state(neotest, bufnr)
     if current.has_running then
       saw_running = true
       saw_fresh_state = true
@@ -888,17 +899,23 @@ local function capture_suite_failure(file_path, bufnr, done, generation)
     end
 
     local completed = current.passed + current.failed + current.skipped
-    if current.total > 0 and generation then
+    if (current.total > 0 or buffer.total > 0) and generation then
       start_status_pulse(current.has_failed and "red" or "green", {
         kind = "suite",
         total = current.total,
+        buffer_total = buffer.total,
         completed = completed,
         failed = current.failed,
         complete = saw_fresh_state and not current.has_running,
       })
     end
 
-    local counts = { passed = current.passed, failed = current.failed, total = current.total }
+    local counts = {
+      passed = current.passed,
+      failed = current.failed,
+      total = current.total,
+      buffer_total = buffer.total,
+    }
     if saw_fresh_state and current.failure and not current.has_running then
       finish({
         file_path = current.failure.file_path or file_path,
@@ -1043,23 +1060,33 @@ local function run_fix_cycle(file_path, bufnr, attempt, generation)
     local passed = counts and counts.passed or 0
     local failed = counts and counts.failed or 0
     local total = counts and counts.total or (passed + failed)
+    local current_buffer_total = counts and counts.buffer_total or 0
+    local suite_status = {
+      kind = "suite",
+      total = total,
+      buffer_total = current_buffer_total,
+      completed = total,
+      failed = failed,
+      complete = true,
+    }
     if not failure then
       if not start_refactoring_if_present(file_path, bufnr) then
         loop_running = false
-        set_status("green", { kind = "suite", total = total, completed = total, failed = 0, complete = true })
+        suite_status.failed = 0
+        set_status("green", suite_status)
       end
       return
     end
     if failure.suite_error then
       loop_running = false
-      set_status("red", { kind = "suite", total = total, completed = total, failed = failed, complete = true })
+      set_status("red", suite_status)
       notify_terminal_failure(failure.message)
       return
     end
     start_status_pulse("red", status_detail)
     if attempt >= config.max_retries then
       loop_running = false
-      set_status("red", { kind = "suite", total = total, completed = total, failed = failed, complete = true })
+      set_status("red", suite_status)
       notify_terminal_failure(string.format(
         "Max retries exhausted. Giving up. (%d passed, %d failed)\nLast failure (%s): %s",
         passed, failed, tostring(failure.test_id), tostring(failure.message)))
@@ -1072,7 +1099,7 @@ local function run_fix_cycle(file_path, bufnr, attempt, generation)
         end
       else
         loop_running = false
-        set_status("red", { kind = "suite", total = total, completed = total, failed = failed, complete = true })
+        set_status("red", suite_status)
       end
     end, generation)
   end, generation)
@@ -1272,8 +1299,16 @@ local function start_tdd_cycle(file_path, bufnr, save_buffer, restart)
   if save_buffer then
     vim.cmd("write")
   end
-  suite_total = nil
-  start_status_pulse("green", { kind = "suite", total = 0, completed = 0, failed = 0, complete = false })
+  buffer_total = nil
+  solution_total = nil
+  start_status_pulse("green", {
+    kind = "suite",
+    total = 0,
+    buffer_total = 0,
+    completed = 0,
+    failed = 0,
+    complete = false,
+  })
   run_fix_cycle(file_path, bufnr, 0, generation)
 end
 
