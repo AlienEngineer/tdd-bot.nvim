@@ -534,7 +534,8 @@ local function build_refactor_prompt(context)
     "Apply the following refactoring exactly as described, with minimal unrelated changes.",
     "Inspect and change every related project file required, including affected tests, but only " .. file_type .. ".",
     "Do not edit generated build output or files with other extensions.",
-    "Once applied, remove the refactoring comment that requested it.",
+    "Once applied, remove only the refactoring comment that requested it.",
+    "Preserve every other // Refactoring: directive in this file, including duplicate requests.",
     "Run relevant tests before finishing.",
     "File: " .. context.file_path,
     "Line: " .. tostring(context.line),
@@ -549,7 +550,7 @@ local function build_refactor_repair_prompt(context, failure)
     "Finish this refactoring. Previous candidate failed verification.",
     "Make minimal related implementation and test changes needed to pass, but only " .. file_type .. ".",
     "Do not edit generated build output or files with other extensions.",
-    "Keep requested refactoring and remove its comment.",
+    "Keep requested refactoring, remove only its comment, and preserve every other // Refactoring: directive in this file.",
     "Run relevant tests before finishing.",
     "File: " .. context.file_path,
     "Refactoring: " .. context.text,
@@ -567,7 +568,7 @@ local function find_refactoring_comments(bufnr)
     if text then
       text = text:gsub("%s+$", "")
       if text ~= "" then
-        refactorings[#refactorings + 1] = { line = i, text = text }
+        refactorings[#refactorings + 1] = { line = i, text = text, directive = line }
       end
     end
   end
@@ -984,6 +985,61 @@ local function find_refactoring_comment(bufnr, text, occurrence)
   return nil
 end
 
+local function preserve_queued_refactoring_comments(file_path, bufnr, changes, refactorings, index)
+  local change = changes[file_path]
+  if not change then
+    return
+  end
+
+  local pending, lines, changed = {}, change.after.lines, false
+  local pending_texts = {}
+  for i = index + 1, #refactorings do
+    pending[#pending + 1] = refactorings[i]
+    pending_texts[refactorings[i].text] = true
+  end
+
+  local pending_index = 1
+  for line_index, line in ipairs(lines) do
+    local text = line:match("//%s*[Rr]efactoring:%s*(.+)$")
+    if text then
+      text = text:gsub("%s+$", "")
+      local expected = pending[pending_index]
+      if expected and text == expected.text then
+        if line ~= expected.directive then
+          lines[line_index] = expected.directive
+          changed = true
+        end
+        pending_index = pending_index + 1
+      end
+    end
+  end
+
+  if pending_index <= #pending then
+    local preserved_lines = {}
+    for _, line in ipairs(lines) do
+      local text = line:match("//%s*[Rr]efactoring:%s*(.+)$")
+      text = text and text:gsub("%s+$", "")
+      if not text or not pending_texts[text] then
+        preserved_lines[#preserved_lines + 1] = line
+      end
+    end
+    lines = preserved_lines
+    for _, pending_refactoring in ipairs(pending) do
+      lines[#lines + 1] = pending_refactoring.directive
+    end
+    change.after.lines = lines
+    changed = true
+  end
+
+  if changed then
+    change.after.exists = true
+    vim.fn.writefile(lines, file_path)
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    end
+  end
+end
+
 local function run_refactor_cycle(file_path, bufnr, refactorings, index)
   if index > #refactorings then
     loop_running = false
@@ -1025,6 +1081,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
     else
       candidate_state = candidate
     end
+    preserve_queued_refactoring_comments(file_path, bufnr, candidate_state.changes, refactorings, index)
     local diff = candidate_diff(candidate_state.changes)
     show_refactoring_review(file_path, diff, refactor.text, function()
       sync_candidate_buffers(candidate_state.changes)

@@ -1420,7 +1420,6 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
   state.file_contents["/tmp/sample_test.dart"] = {
     "local function helper() return 1 end",
     "local y = 2",
-    "// Refactoring: rename y to total",
   }
   state.job_calls[1].opts.on_exit(1, 0)
   assert(#state.commands == 1 and state.commands[1] == "write",
@@ -1428,6 +1427,13 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
   assert(#state.job_calls == 1, "expected next refactoring to wait for review decision")
   assert(bot._is_running(), "expected loop to stay running while review is unresolved")
   local popup = state.popup_calls[1]
+  local review = table.concat(state.popup_buffers[popup.buf], "\n")
+  assert(review:find("// Refactoring: rename y to total", 1, true),
+    "expected first review to preserve next refactoring directive")
+  assert(state.file_contents["/tmp/sample_test.dart"][3] == "// Refactoring: rename y to total",
+    "expected next refactoring directive restored on disk before review")
+  assert(state.buf_lines[current_buf][3] == "// Refactoring: rename y to total",
+    "expected next refactoring directive restored in buffer before review")
   popup_mapping(popup, "a")()
   assert(#state.commands == 3 and state.commands[2] == "e!" and state.commands[3] == "w",
     "expected accepted refactoring to reload from disk then save")
@@ -1483,6 +1489,31 @@ local function test_refactor_rejection_restores_snapshot_and_advances_once()
     assert(state.lines_by_buf[current_buf][i] == line, "expected rejected candidate removed from buffer")
   end
   assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● Off 1", "expected rejected item removed from queue count")
+end
+
+local function test_duplicate_refactoring_directives_survive_accepted_candidate()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local lines = {
+    "// Refactoring: extract helper",
+    "// Refactoring: extract helper",
+  }
+  state.buf_lines[current_buf] = lines
+  state.file_contents["/tmp/sample_test.dart"] = lines
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "local function helper() end" }
+  state.job_calls[1].opts.on_exit(1, 0)
+  assert(state.file_contents["/tmp/sample_test.dart"][2] == "// Refactoring: extract helper",
+    "expected pending duplicate directive restored before first review")
+  popup_mapping(state.popup_calls[1], "a")()
+
+  assert(#state.job_calls == 2, "expected remaining duplicate directive to start its own job")
+  assert(arg_after(state.job_calls[2].cmd, "-p"):find("Line: 2", 1, true),
+    "expected remaining duplicate directive location recalculated")
 end
 
 local function test_duplicate_refactoring_requests_advance_after_rejection()
@@ -1650,6 +1681,38 @@ local function test_refactor_repairs_related_source_and_tests()
   assert(state.file_contents["/tmp/related_test.dart"][1] == "assert(extracted() == 1)",
     "expected repaired test retained")
   assert(state.buf_lines[2][1] == "assert(extracted() == 1)", "expected loaded related test buffer synced")
+end
+
+local function test_refactor_repair_preserves_pending_directives()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local lines = {
+    "// Refactoring: extract helper",
+    "// Refactoring: rename helper",
+  }
+  state.buf_lines[current_buf] = lines
+  state.file_contents["/tmp/sample_test.dart"] = lines
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "local function helper() end" }
+  neotest_mode = "fail-results"
+  state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "a")()
+  assert(#state.job_calls == 2, "expected failed first refactoring to start repair")
+
+  state.file_contents["/tmp/sample_test.dart"] = { "local function fixed_helper() end" }
+  neotest_mode = "pass"
+  state.job_calls[2].opts.on_exit(2, 0)
+  assert(state.file_contents["/tmp/sample_test.dart"][2] == "// Refactoring: rename helper",
+    "expected repair candidate to preserve next refactoring directive")
+  popup_mapping(state.popup_calls[2], "a")()
+
+  assert(#state.job_calls == 3, "expected preserved directive to start after repaired refactoring")
+  assert(arg_after(state.job_calls[3].cmd, "-p"):find("rename helper", 1, true),
+    "expected next refactoring prompt after repair")
 end
 
 local function test_refactor_only_reviews_matching_extension_and_restores_generated_output()
@@ -1951,12 +2014,14 @@ test_tdr_mapping_exists()
 test_refactor_saves_buffer_before_running_tests()
 test_refactor_queue_waits_for_acceptance_before_next_job()
 test_refactor_rejection_restores_snapshot_and_advances_once()
+test_duplicate_refactoring_directives_survive_accepted_candidate()
 test_duplicate_refactoring_requests_advance_after_rejection()
 test_closing_refactoring_review_rejects_candidate()
 test_refactor_status_transitions_from_blue_to_red_or_green()
 test_refactor_no_comments_found()
 test_refactor_aborts_when_tests_red()
 test_refactor_repairs_related_source_and_tests()
+test_refactor_repair_preserves_pending_directives()
 test_refactor_only_reviews_matching_extension_and_restores_generated_output()
 test_extensionless_refactor_excludes_files_with_extensions()
 test_refactor_rejection_restores_all_workspace_changes()
