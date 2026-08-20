@@ -430,7 +430,7 @@ local function install_neotest()
         end
         return {}
       end,
-      status_counts = function(adapter_id)
+      status_counts = function(adapter_id, args)
         if not suite_run_started then
           if neotest_mode == "stale-then-pass" then
             return { running = 0, failed = 1 }
@@ -462,6 +462,16 @@ local function install_neotest()
             return { running = 3, passed = 2, failed = 0 }
           end
           return { running = 0, passed = 5, failed = 0 }
+        end
+        if neotest_mode == "buffer-progress" then
+          if adapter_id == "fake" and args and args.buffer == current_buf then
+            progress_poll_count = progress_poll_count + 1
+            if progress_poll_count == 1 then
+              return { running = 1, passed = 1, failed = 0, total = 2 }
+            end
+            return { running = 0, passed = 2, failed = 0, total = 2 }
+          end
+          return { running = 0, passed = 5, failed = 0, total = 5 }
         end
         if neotest_mode == "stale-idle-then-160" then
           fresh_poll_count = fresh_poll_count + 1
@@ -952,6 +962,29 @@ local function test_suite_status_shows_failure_count()
   local status = state.status_calls[2]
   assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected failed suite total beside enabled status")
   assert(state.lines_by_buf[status.buf][2] == "1/1 ✗", "expected failing suite count and failure symbol")
+end
+
+local function test_suite_status_shows_only_current_buffer_total()
+  reset_state()
+  state.defer_polls = true
+  neotest_mode = "buffer-progress"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][1] == "● On 2",
+    "expected status total to include only tests in the current buffer")
+  assert(state.lines_by_buf[status.buf][2] == "1/2...",
+    "expected progress to include only tests in the current buffer")
+
+  table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][1] == "● On 2",
+    "expected completed status total to include only tests in the current buffer")
+  assert(state.lines_by_buf[status.buf][2] == "2 ✓",
+    "expected completed count to include only tests in the current buffer")
 end
 
 local function test_status_dot_recovers_after_manual_close()
@@ -2152,6 +2185,7 @@ test_tdd_starts_refactoring_queue_after_fix_recovery()
 test_status_dot_reflects_confirmed_tdd_results()
 test_suite_status_shows_live_progress_and_success()
 test_suite_status_shows_failure_count()
+test_suite_status_shows_only_current_buffer_total()
 test_status_dot_recovers_after_manual_close()
 test_failure_in_any_adapter_beats_passing_adapter()
 test_stale_failure_from_prior_run_is_ignored()
