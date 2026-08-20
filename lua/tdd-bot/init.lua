@@ -739,16 +739,77 @@ local function has_any_results(results)
   return next(results) ~= nil
 end
 
-local function fetch_suite_results(neotest, adapter_id, root)
-  local ok, results = pcall(neotest.state.results, adapter_id, root)
-  if ok and type(results) == "table" then
-    return results
-  end
-  ok, results = pcall(neotest.state.results, adapter_id)
+local function fetch_suite_results(neotest, adapter_id)
+  local ok, results = pcall(neotest.state.results, adapter_id)
   if ok and type(results) == "table" then
     return results
   end
   return {}
+end
+
+local function collect_suite_state(neotest)
+  local snapshot = {
+    has_running = false,
+    has_failed = false,
+    has_results = false,
+    all_adapters_passed = true,
+    passed = 0,
+    failed = 0,
+    skipped = 0,
+    running = 0,
+    total = 0,
+    signature = {},
+  }
+  local reported_total = 0
+  local has_reported_total = false
+
+  for _, adapter_id in ipairs(neotest.state.adapter_ids() or {}) do
+    if neotest.state.status_counts then
+      local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id)
+      if ok_counts and type(counts) == "table" then
+        for _, status in ipairs({ "passed", "failed", "skipped", "running" }) do
+          local count = counts[status]
+          if type(count) == "number" then
+            snapshot[status] = snapshot[status] + count
+          end
+        end
+        if type(counts.total) == "number" then
+          reported_total = reported_total + counts.total
+          has_reported_total = true
+        end
+      end
+    end
+
+    local results = fetch_suite_results(neotest, adapter_id)
+    local test_id, failure_message, failed_result = first_failed_result(results)
+    if test_id and not snapshot.failure then
+      snapshot.failure = {
+        file_path = failed_result and failed_result.path,
+        test_id = test_id,
+        message = failure_message,
+      }
+    end
+    if all_results_passed(results) then
+      snapshot.has_results = true
+    elseif has_any_results(results) then
+      snapshot.all_adapters_passed = false
+    end
+    for test_id, result in pairs(results) do
+      snapshot.signature[#snapshot.signature + 1] = table.concat({
+        adapter_id,
+        tostring(test_id),
+        tostring(result and result.status),
+      }, "\0")
+    end
+  end
+
+  table.sort(snapshot.signature)
+  snapshot.signature = table.concat(snapshot.signature, "\n")
+  snapshot.has_running = snapshot.running > 0
+  snapshot.has_failed = snapshot.failed > 0
+  snapshot.total = has_reported_total and reported_total
+    or (snapshot.passed + snapshot.failed + snapshot.skipped + snapshot.running)
+  return snapshot
 end
 
 local function first_failed_quickfix(file_path)
@@ -786,6 +847,7 @@ local function capture_suite_failure(file_path, done, generation)
 
   last_failure = nil
   local root = find_project_root(file_path)
+  local previous = collect_suite_state(neotest)
   local run_ok = pcall(neotest.run.run, root)
   if not run_ok then
     done({
@@ -799,7 +861,7 @@ local function capture_suite_failure(file_path, done, generation)
 
   local started_at = now_ms()
   local saw_running = false
-  local poll_count = 0
+  local saw_fresh_state = false
 
   local function finish(failure, counts)
     if generation and generation ~= tdd_run_generation then
@@ -813,118 +875,69 @@ local function capture_suite_failure(file_path, done, generation)
     if generation and generation ~= tdd_run_generation then
       return
     end
-    poll_count = poll_count + 1
-    -- Neotest's status/results cache is global and cumulative across runs; on
-    -- the very first poll it may still reflect the previous invocation before
-    -- this run's async `run` event has fired. Wait one extra cycle so stale
-    -- failures/passes from a prior session aren't mistaken for this run's result.
-    local trust_results = poll_count > 1
-
-    local adapter_ids = neotest.state.adapter_ids() or {}
-    local has_running = false
-    local has_failed = false
-    local total_passed = 0
-    local total_failed = 0
-    local total_skipped = 0
-    local total_running = 0
-    local all_adapters_passed = true
-    local has_results = false
-
-    for _, adapter_id in ipairs(adapter_ids) do
-      if neotest.state.status_counts then
-        local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id, root)
-        if ok_counts and counts and type(counts.running) == "number" and counts.running > 0 then
-          has_running = true
-          saw_running = true
-          total_running = total_running + counts.running
-        end
-        if ok_counts and counts and type(counts.failed) == "number" and counts.failed > 0 then
-          has_failed = true
-        end
-        if ok_counts and counts then
-          if type(counts.passed) == "number" then
-            total_passed = total_passed + counts.passed
-          end
-          if type(counts.failed) == "number" then
-            total_failed = total_failed + counts.failed
-          end
-          if type(counts.skipped) == "number" then
-            total_skipped = total_skipped + counts.skipped
-          end
-        end
-      end
-
-      local results = fetch_suite_results(neotest, adapter_id, root)
-      local test_id, failure_message, failed_result = first_failed_result(results)
-      if test_id and trust_results then
-        local total = total_passed + total_failed + total_skipped + total_running
-        if generation and total > 0 then
-          start_status_pulse("red", {
-            kind = "suite",
-            total = total,
-            completed = total_passed + total_failed + total_skipped,
-            failed = total_failed,
-            complete = not has_running,
-          })
-        end
-        finish({
-          file_path = failed_result and failed_result.path or file_path,
-          test_id = test_id,
-          message = failure_message,
-          updated_at = now_ms(),
-        }, { passed = total_passed, failed = total_failed, total = total })
-        return
-      end
-
-      if all_results_passed(results) then
-        has_results = true
-      elseif has_any_results(results) then
-        all_adapters_passed = false
-      end
+    local current = collect_suite_state(neotest)
+    if current.has_running then
+      saw_running = true
+      saw_fresh_state = true
+    elseif current.signature ~= previous.signature
+      or current.total ~= previous.total
+      or current.passed ~= previous.passed
+      or current.failed ~= previous.failed
+      or current.skipped ~= previous.skipped then
+      saw_fresh_state = true
     end
 
-    local total = total_passed + total_failed + total_skipped + total_running
-    local completed = total_passed + total_failed + total_skipped
-    if total > 0 and generation then
-      start_status_pulse(has_failed and "red" or "green", {
+    local completed = current.passed + current.failed + current.skipped
+    if current.total > 0 and generation then
+      start_status_pulse(current.has_failed and "red" or "green", {
         kind = "suite",
-        total = total,
+        total = current.total,
         completed = completed,
-        failed = total_failed,
-        complete = not has_running,
+        failed = current.failed,
+        complete = saw_fresh_state and not current.has_running,
       })
     end
 
-    if has_failed and trust_results and (saw_running or not has_running) then
+    local counts = { passed = current.passed, failed = current.failed, total = current.total }
+    if saw_fresh_state and current.failure and not current.has_running then
+      finish({
+        file_path = current.failure.file_path or file_path,
+        test_id = current.failure.test_id,
+        message = current.failure.message,
+        updated_at = now_ms(),
+      }, counts)
+      return
+    end
+
+    if saw_fresh_state and current.has_failed and not current.has_running then
       local qf = first_failed_quickfix(file_path)
       finish({
         file_path = file_path,
         test_id = qf and ("line " .. tostring(qf.lnum or "?")) or "<unknown>",
         message = qf and (qf.text or "Tests failed.") or "Tests failed. No failure output found.",
         updated_at = now_ms(),
-      }, { passed = total_passed, failed = total_failed, total = total })
+      }, counts)
       return
     end
 
-    if saw_running and not has_running and trust_results then
-      finish(nil, { passed = total_passed, failed = total_failed, total = total })
-      return
-    end
-
-    if has_results and all_adapters_passed and not has_running and trust_results then
-      finish(nil, { passed = total_passed, failed = total_failed, total = total })
-      return
-    end
-
-    if not has_failed and not has_running and (total_passed > 0 or total_skipped > 0) and trust_results then
-      finish(nil, { passed = total_passed, failed = total_failed, total = total })
+    if saw_fresh_state and not current.has_running
+      and (saw_running
+        or (current.has_results and current.all_adapters_passed)
+        or (not current.has_failed and completed > 0)) then
+      finish(nil, counts)
       return
     end
 
     if now_ms() - started_at < config.result_timeout_ms then
       vim.defer_fn(inspect_results, config.poll_interval_ms)
     else
-      finish(nil, { passed = total_passed, failed = total_failed, total = total })
+      finish({
+        file_path = file_path,
+        test_id = "<suite>",
+        message = "Timed out waiting for the requested neotest suite to start.",
+        suite_error = true,
+        updated_at = now_ms(),
+      }, counts)
     end
   end
 
@@ -1035,6 +1048,12 @@ local function run_fix_cycle(file_path, bufnr, attempt, generation)
         loop_running = false
         set_status("green", { kind = "suite", total = total, completed = total, failed = 0, complete = true })
       end
+      return
+    end
+    if failure.suite_error then
+      loop_running = false
+      set_status("red", { kind = "suite", total = total, completed = total, failed = failed, complete = true })
+      notify_terminal_failure(failure.message)
       return
     end
     start_status_pulse("red", status_detail)
@@ -1289,6 +1308,9 @@ function M.run_refactor()
     if failure then
       loop_running = false
       set_status("red")
+      if failure.suite_error then
+        notify_terminal_failure(failure.message)
+      end
       return
     end
     if not start_refactoring_if_present(file_path, bufnr) then
