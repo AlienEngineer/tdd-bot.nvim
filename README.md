@@ -20,7 +20,7 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 - after a failure-fix Copilot job exits, syncs any changed buffer with on-disk content (via `nvim_buf_set_lines`, not `:edit!`, so `FileType`/`BufReadPost` autocmds — and any LSP client attached through them — aren't re-triggered) and opens a popup with a unified diff
 - `<leader>tdc` clears the stored Copilot session for the current file, so the next `<leader>tdd` on it starts fresh
 - `<leader>tdr` saves current buffer, scans it for `// Refactoring: <what to do>` comments, and queues each one for background Copilot review; Copilot is instructed to remove the comment once the refactoring is applied
-- `<leader>tdm` opens model selector with `auto` plus every model ID returned by Copilot CLI
+- `<leader>tdm` prompts for a Copilot model ID; `auto` is suggested
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
 - each refactoring opens a focused diff review: press `a` to accept or `r`, `q`, or `<Esc>` to reject; only accepted changes reload and save the buffer, then rerun tests
 - rejected changes restore pre-refactoring disk and buffer content without saving candidate changes; queue advances only after accept or reject
@@ -71,7 +71,7 @@ leader key.
 | `<leader>tdd` | Save current buffer and run tests for current file. On failure, start a background Copilot fix; rerun tests once Copilot exits. |
 | `<leader>tdc` | Clear stored Copilot session for current file. Next fix starts a fresh Copilot session. |
 | `<leader>tdr` | Save current buffer, then apply every `// Refactoring: <request>` comment through Copilot. Tests must pass before refactoring begins. |
-| `<leader>tdm` | Choose model for future tdd-bot Copilot jobs. `auto` is default. |
+| `<leader>tdm` | Type model for future tdd-bot Copilot jobs. `auto` is suggested. |
 
 ### Fix failing tests
 
@@ -124,9 +124,9 @@ permission, path, URL, MCP/plugin, agent, model, prompt, and session flags from
 this setting, then appends its fixed project-confinement policy. Do not include
 `-p` in `copilot_cmd`; tdd-bot appends prompt automatically.
 
-Press `<leader>tdm` to scrape every model ID returned by installed,
-authenticated Copilot CLI's `/model` selector and choose one for this Neovim
-session. Availability depends on account, organization policy, and CLI version.
-`auto` is default and always available. Selection applies to future TDD fixes
-and refactorings; it is not persisted across restarts. If Copilot rejects
-selected model as unavailable, tdd-bot retries that job once with `auto`.
+Press `<leader>tdm` to type any Copilot model ID. `auto` is suggested by default,
+and models typed during this Neovim session are shown in later prompts for easy
+reuse. Selection applies to future TDD fixes and refactorings; it is not
+persisted across restarts. If Copilot rejects a selected model as unavailable,
+tdd-bot removes it from saved models and prompts for a replacement, suggesting
+`auto`.

@@ -100,6 +100,7 @@ local status_pulse_bright = true
 local status_pulse_generation = 0
 local status_pending_refactorings = nil
 local preferred_model = "auto"
+local saved_models = { "auto" }
 
 local status_highlights = {
   red = { bright = "TddBotStatusRed", dim = "TddBotStatusRedDim" },
@@ -455,20 +456,41 @@ local function output_has_unavailable_model_error(output)
   return output:match("[Mm]odel%s+.-%s+from%s+%-%-model%s+flag%s+is%s+not%s+available") ~= nil
 end
 
-local function parse_models(output)
-  local seen = { auto = true }
-  local models = { "auto" }
-  output = output:gsub("\27%[[0-?]*[ -/]*[@-~]", ""):gsub("\r", "\n")
-  for line in output:gmatch("[^\n]+") do
-    local token = line:match("^%s*([%w][%w%._%-]*)%s*$")
-      or line:match("^%s*%d+[%)%.]%s*([%w][%w%._%-]*)%s*$")
-      or line:match("^%s*[^%w]*([%w][%w%._%-]*)%s*$")
-    if token and not seen[token] then
-      seen[token] = true
-      models[#models + 1] = token
+local function remember_model(model)
+  for _, saved_model in ipairs(saved_models) do
+    if saved_model == model then
+      return
     end
   end
-  return models
+  saved_models[#saved_models + 1] = model
+end
+
+local function forget_model(model)
+  for index, saved_model in ipairs(saved_models) do
+    if saved_model == model then
+      table.remove(saved_models, index)
+      return
+    end
+  end
+end
+
+local function prompt_for_model(on_choice)
+  vim.ui.input({
+    prompt = "Copilot model (saved: " .. table.concat(saved_models, ", ") .. "; Enter for auto): ",
+    default = "auto",
+  }, function(input)
+    if input == nil then
+      on_choice(nil)
+      return
+    end
+    local model = input:match("^%s*(.-)%s*$")
+    if model == "" then
+      model = "auto"
+    end
+    preferred_model = model
+    remember_model(model)
+    on_choice(model)
+  end)
 end
 
 local function first_failed_result(results)
@@ -678,7 +700,7 @@ local function run_copilot_job(context, prompt, on_done, review)
   local snapshots = snapshot_open_buffers()
   local disk_lines = review and vim.fn.readfile(context.file_path) or nil
   local cwd = find_project_root(context.file_path)
-  local function start_job(model, is_fallback)
+  local function start_job(model)
     local output = {}
     local job_id = vim.fn.jobstart(build_copilot_cmd(context, prompt, model), {
       cwd = cwd,
@@ -692,8 +714,16 @@ local function run_copilot_job(context, prompt, on_done, review)
       end,
       on_exit = function(_, _)
         copilot_job_id = nil
-        if not is_fallback and model ~= "auto" and output_has_unavailable_model_error(table.concat(output, "\n")) then
-          start_job("auto", true)
+        if model ~= "auto" and output_has_unavailable_model_error(table.concat(output, "\n")) then
+          forget_model(model)
+          preferred_model = "auto"
+          prompt_for_model(function(next_model)
+            if next_model then
+              start_job(next_model)
+            else
+              on_done(false)
+            end
+          end)
           return
         end
         if review then
@@ -713,7 +743,7 @@ local function run_copilot_job(context, prompt, on_done, review)
     end
     copilot_job_id = job_id
   end
-  start_job(preferred_model, false)
+  start_job(preferred_model)
 end
 
 local function start_copilot_background(failure, on_done)
@@ -905,48 +935,7 @@ function M.select_model()
   if loop_running or copilot_job_id then
     return
   end
-  if vim.fn.executable("copilot") ~= 1 then
-    vim.notify("[tdd-bot] Copilot CLI is not available.", vim.log.levels.ERROR)
-    return
-  end
-
-  local output = {}
-  local job_id = vim.fn.jobstart({ "copilot", "--no-color", "-i", "/model" }, {
-    pty = true,
-    stdout_buffered = true,
-    stderr_buffered = true,
-    on_stdout = function(_, data)
-      output[#output + 1] = table.concat(data or {}, "\n")
-    end,
-    on_stderr = function(_, data)
-      output[#output + 1] = table.concat(data or {}, "\n")
-    end,
-    on_exit = function(_, code)
-      if code ~= 0 then
-        vim.notify("[tdd-bot] Could not read available Copilot models.", vim.log.levels.ERROR)
-        return
-      end
-      local models = parse_models(table.concat(output, "\n"))
-      if #models == 1 then
-        vim.notify("[tdd-bot] Copilot did not list any available models.", vim.log.levels.ERROR)
-        return
-      end
-      vim.ui.select(models, {
-        prompt = "Copilot model (current: " .. preferred_model .. ")",
-      }, function(choice)
-        if choice then
-          preferred_model = choice
-        end
-      end)
-    end,
-  })
-  if job_id <= 0 then
-    vim.notify("[tdd-bot] Could not start Copilot model selector.", vim.log.levels.ERROR)
-    return
-  end
-  vim.defer_fn(function()
-    vim.fn.chansend(job_id, "/exit\n")
-  end, 1000)
+  prompt_for_model(function() end)
 end
 
 function M.setup(opts)
