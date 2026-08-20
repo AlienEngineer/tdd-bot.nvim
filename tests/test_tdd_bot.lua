@@ -66,6 +66,7 @@ local real = {
   jobstart = vim.fn.jobstart,
   chansend = vim.fn.chansend,
   ui_select = vim.ui.select,
+  ui_input = vim.ui.input,
   uv_now = vim.uv and vim.uv.now or nil,
   uv_fs_stat = vim.uv and vim.uv.fs_stat or nil,
 }
@@ -247,6 +248,10 @@ vim.ui.select = function(items, opts, on_choice)
   table.insert(state.select_calls, { items = items, opts = opts, on_choice = on_choice })
 end
 
+vim.ui.input = function(opts, on_confirm)
+  table.insert(state.input_calls, { opts = opts, on_confirm = on_confirm })
+end
+
 vim.uv = vim.uv or {}
 vim.uv.now = function()
   fake_now = fake_now + 100
@@ -269,6 +274,7 @@ local function reset_state()
   state.run_calls = {}
   state.job_calls = {}
   state.select_calls = {}
+  state.input_calls = {}
   state.qflist = {}
   state.copilot_exists = true
   state.jobstart_result = nil
@@ -420,7 +426,7 @@ local function test_tdd_saves_buffer_before_running_tests()
   assert(#state.run_calls == 1, "expected TDD to run tests after saving current buffer")
 end
 
-local function test_model_mapping_and_selector_uses_current_cli_models()
+local function test_model_mapping_prompts_for_typed_model_and_remembers_it()
   reset_state()
   install_neotest()
   local bot = load_bot()
@@ -429,65 +435,51 @@ local function test_model_mapping_and_selector_uses_current_cli_models()
   local select_model = mapped_handler("<leader>tdm")
   assert(select_model, "expected <leader>tdm mapping")
   select_model()
-  local call = state.job_calls[1]
-  assert(call.cmd[1] == "copilot" and call.cmd[3] == "-i" and call.cmd[4] == "/model",
-    "expected selector to scrape Copilot /model output")
-  call.opts.on_stdout(1, {
-    "\27[1mSelect a model\27[0m",
-    "  > gpt-5.3-codex",
-    "  mai-code-1",
-    "  3. deepseek-r1",
-    "  claude-sonnet-4.5",
-    "  mai-code-1",
-    "Press Enter to confirm",
-  })
-  call.opts.on_exit(1, 0)
-
-  assert(#state.select_calls == 1, "expected available models popup")
-  local popup = state.select_calls[1]
-  assert(popup.items[1] == "auto", "expected auto first")
-  assert(#popup.items == 5
-      and popup.items[2] == "gpt-5.3-codex"
-      and popup.items[3] == "mai-code-1"
-      and popup.items[4] == "deepseek-r1"
-      and popup.items[5] == "claude-sonnet-4.5",
-    "expected every scraped model choice in CLI order without duplicates or UI text")
-  popup.on_choice("claude-sonnet-4.5")
-  assert(bot._get_model() == "claude-sonnet-4.5", "expected selected model kept for session")
+  assert(#state.input_calls == 1, "expected a model text prompt")
+  assert(#state.job_calls == 0, "expected typing a model not to launch Copilot")
+  local prompt = state.input_calls[1]
+  assert(prompt.opts.default == "auto", "expected auto to be suggested")
+  assert(prompt.opts.prompt:find("saved: auto", 1, true), "expected saved models in prompt")
+  prompt.on_confirm(" claude-sonnet-4.5 ")
+  assert(bot._get_model() == "claude-sonnet-4.5", "expected typed model kept for session")
   select_model()
-  state.job_calls[2].opts.on_stdout(2, { "gpt-5.3-codex" })
-  state.job_calls[2].opts.on_exit(2, 0)
-  state.select_calls[2].on_choice(nil)
+  assert(state.input_calls[2].opts.prompt:find("claude-sonnet-4.5", 1, true),
+    "expected typed model saved for reuse")
+  state.input_calls[2].on_confirm(nil)
   assert(bot._get_model() == "claude-sonnet-4.5", "expected cancelled selector to retain current model")
 end
 
-local function test_selected_model_applies_to_jobs_and_falls_back_to_auto()
+local function test_selected_model_applies_to_jobs_and_prompts_on_unavailable_model()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
   local bot = load_bot()
   bot.setup()
   bot.select_model()
-  state.job_calls[1].opts.on_stdout(1, { "gpt-5.3-codex" })
-  state.job_calls[1].opts.on_exit(1, 0)
-  state.select_calls[1].on_choice("gpt-5.3-codex")
+  state.input_calls[1].on_confirm("gpt-5.3-codex")
 
   bot.run_tdd()
-  local first = state.job_calls[2]
+  local first = state.job_calls[1]
   assert(arg_after(first.cmd, "--model") == "gpt-5.3-codex", "expected chosen model in TDD job")
   first.opts.on_stderr(2, { 'Model "gpt-5.3-codex" from --model flag is not available' })
   first.opts.on_exit(2, 1)
 
-  local fallback = state.job_calls[3]
-  assert(arg_after(fallback.cmd, "--model") == "auto", "expected unavailable model retry with auto")
-  assert(arg_after(fallback.cmd, "--session-id") == arg_after(first.cmd, "--session-id"),
-    "expected fallback to retain Copilot session")
-  assert(arg_after(fallback.cmd, "-p") == arg_after(first.cmd, "-p"), "expected fallback to retain prompt")
-  assert(arg_after(fallback.cmd, "--add-dir") == "/tmp", "expected fallback to retain project root")
-  assert(contains(fallback.cmd, "--available-tools=view,glob,rg,apply_patch,bash"),
-    "expected fallback to retain tool confinement")
-  assert(contains(fallback.cmd, "--deny-tool=url"), "expected fallback to retain URL denial")
-  assert(bot._get_model() == "gpt-5.3-codex", "expected fallback not to overwrite selection")
+  assert(#state.input_calls == 2, "expected unavailable model to prompt for replacement")
+  assert(state.input_calls[2].opts.default == "auto", "expected replacement prompt to suggest auto")
+  assert(not state.input_calls[2].opts.prompt:find("gpt-5.3-codex", 1, true),
+    "expected unavailable model removed from saved models")
+  state.input_calls[2].on_confirm("claude-sonnet-4.5")
+
+  local retry = state.job_calls[2]
+  assert(arg_after(retry.cmd, "--model") == "claude-sonnet-4.5", "expected replacement model retried")
+  assert(arg_after(retry.cmd, "--session-id") == arg_after(first.cmd, "--session-id"),
+    "expected replacement retry to retain Copilot session")
+  assert(arg_after(retry.cmd, "-p") == arg_after(first.cmd, "-p"), "expected replacement retry to retain prompt")
+  assert(arg_after(retry.cmd, "--add-dir") == "/tmp", "expected replacement retry to retain project root")
+  assert(contains(retry.cmd, "--available-tools=view,glob,rg,apply_patch,bash"),
+    "expected replacement retry to retain tool confinement")
+  assert(contains(retry.cmd, "--deny-tool=url"), "expected replacement retry to retain URL denial")
+  assert(bot._get_model() == "claude-sonnet-4.5", "expected replacement to become selected model")
 end
 
 local function test_selected_model_applies_to_refactor_jobs()
@@ -498,12 +490,10 @@ local function test_selected_model_applies_to_refactor_jobs()
   local bot = load_bot()
   bot.setup()
   bot.select_model()
-  state.job_calls[1].opts.on_stdout(1, { "claude-sonnet-4.5" })
-  state.job_calls[1].opts.on_exit(1, 0)
-  state.select_calls[1].on_choice("claude-sonnet-4.5")
+  state.input_calls[1].on_confirm("claude-sonnet-4.5")
 
   bot.run_refactor()
-  local call = state.job_calls[2]
+  local call = state.job_calls[1]
   assert(arg_after(call.cmd, "--model") == "claude-sonnet-4.5",
     "expected selected model in refactoring job")
   assert(call.opts.cwd == "/tmp", "expected refactor job to run in project root")
@@ -1567,8 +1557,8 @@ end
 
 test_tdd_mapping_exists()
 test_tdd_saves_buffer_before_running_tests()
-test_model_mapping_and_selector_uses_current_cli_models()
-test_selected_model_applies_to_jobs_and_falls_back_to_auto()
+test_model_mapping_prompts_for_typed_model_and_remembers_it()
+test_selected_model_applies_to_jobs_and_prompts_on_unavailable_model()
 test_custom_model_mapping_and_command_model_are_replaced()
 test_selected_model_applies_to_refactor_jobs()
 test_failing_run_starts_background_copilot()
@@ -1649,6 +1639,7 @@ vim.fn.getqflist = real.getqflist
 vim.fn.jobstart = real.jobstart
 vim.fn.chansend = real.chansend
 vim.ui.select = real.ui_select
+vim.ui.input = real.ui_input
 if vim.uv then
   vim.uv.now = real.uv_now
   vim.uv.fs_stat = real.uv_fs_stat
