@@ -1,7 +1,7 @@
 # tdd-bot.nvim
 
 `tdd-bot.nvim` keeps a test-driven development loop inside Neovim. It runs the
-current file's tests through [neotest](https://github.com/nvim-neotest/neotest);
+whole project's test suite through [neotest](https://github.com/nvim-neotest/neotest);
 when they fail, it asks the Copilot CLI to fix them in a background job and
 reruns the tests when Copilot exits.
 It also supports Copilot-assisted refactoring that starts only when tests pass.
@@ -12,10 +12,10 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 
 - `<leader>tdd` toggles TDD mode, off by default; enabling it saves current
   buffer, makes it read-only while automated TDD work runs, then restores its
-  prior editability when complete; it runs tests, then repeats that TDD cycle
-  after every file save
-- shows a compact non-focusable floating status dot with `On`/`Off` mode text;
-  it pulses while tests or Copilot work is running
+  prior editability when complete; it runs the project suite, then repeats that
+  suite cycle after every file save
+- shows a compact non-focusable floating status with `On`/`Off` mode text and
+  live whole-suite progress; it pulses while tests or Copilot work is running
 - ignores stale pass/fail state left over from a prior run until the current run is confirmed underway (guards against neotest's cumulative results cache misreporting)
 - on failure, runs Copilot non-interactive fix in background, resuming the same Copilot session for that file across retries/reruns (per-file, in-memory only, not persisted across Neovim restarts)
 - when retries are exhausted, notifies with the last failing test's message so you know why Copilot couldn't fix it
@@ -27,11 +27,13 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
   background Copilot review; Copilot is instructed to remove each applied comment
 - `<leader>tdm` prompts for a Copilot model ID; `auto` is suggested
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
-- each refactoring may change related implementation and test files; review shows one combined workspace diff. Press `a` to accept or `r`, `q`, or `<Esc>` to reject
+- each refactoring may change related implementation and test files only when they share initiating file's extension; generated `build/` output and other file types are restored if Copilot changes them. Review shows one combined workspace diff. Press `a` to accept or `r`, `q`, or `<Esc>` to reject
 - rejected changes restore every candidate file to pre-refactoring content; queue advances only after accept or reject
 - failed accepted refactorings start bounded Copilot repair iterations. Exhaustion restores candidate workspace and stops loop
-- a compact, non-focusable floating dot pulses green while TDD tests run, red
-  during failure recovery, and blue during refactoring; blue shows remaining
+- a compact, non-focusable floating status pulses green while TDD tests run, red
+  during failure recovery, and blue during refactoring; green test progress
+  shows `completed/total...`, completed suites show `total ✓`, and failures show
+  `failed/total ✗`; blue shows remaining
   refactoring count, which decreases after each verified refactoring and hides
   when complete; completed loops leave a static green or red dot
 
@@ -73,7 +75,7 @@ leader key.
 
 | Mapping | Action |
 | --- | --- |
-| `<leader>tdd` | Toggle TDD mode. First press turns it On, saves current buffer, makes that buffer read-only during its automated TDD work, and runs tests. While On, every file save runs that file's TDD/fix/refactor cycle and makes its buffer read-only during the cycle. Next press turns it Off and stops save-triggered cycles. Previous editability returns after recovery and any queued refactoring review finish. |
+| `<leader>tdd` | Toggle TDD mode. First press turns it On, saves current buffer, makes that buffer read-only during automated TDD work, and runs the project suite. While On, every file save restarts that file's suite TDD/fix/refactor cycle and makes its buffer read-only during the cycle. Next press turns it Off and stops save-triggered cycles. Previous editability returns after recovery and any queued refactoring review finish. |
 | `<leader>tdc` | Clear stored Copilot session for current file. Next fix starts a fresh Copilot session. |
 | `<leader>tdr` | Save current buffer, then apply every `// Refactoring: <request>` comment through Copilot. Tests must pass before refactoring begins. |
 | `<leader>tdm` | Type model for future tdd-bot Copilot jobs. `auto` is suggested. |
@@ -82,17 +84,18 @@ leader key.
 
 1. Open test file.
 2. Press `<leader>tdd` to turn TDD mode On and start its first cycle.
-3. Save any file to run its TDD cycle; press `<leader>tdd` again to turn mode Off.
+3. Save any file to run the project suite; saving while it is already running interrupts it and starts a fresh suite run. Press `<leader>tdd` again to turn mode Off.
 4. Watch status dot pulse while Copilot works.
 5. tdd-bot syncs Copilot's changed buffers and reruns tests after Copilot exits.
 6. When tests are green, queued `// Refactoring:` comments enter blue review mode;
    without comments, TDD finishes with static green status.
 
-The floating status shows `On` or `Off` beside its dot in top-right corner. TDD
-mode defaults to Off. Its dot pulses green while a TDD test run waits for a
-result, red while fixing failures, and blue while refactoring; blue also shows
-remaining refactoring count. When work ends it becomes static green for success
-or static red for failure while retaining current mode text.
+The floating status shows `On` or `Off` in the top-right corner. TDD mode defaults to Off.
+A second line shows `--/total` until suite progress is known,
+then green `completed/total...` while it runs. A passing suite settles on green
+`total ✓`; a failing suite shows red `failed/total ✗`. Blue refactoring status
+continues to show its remaining refactoring count. Saving during any active TDD
+work cancels its pending suite/Copilot work before starting the replacement run.
 If every retry fails, tdd-bot shows one notification with passed/failed totals
 and final test failure. Use `<leader>tdc` when you need Copilot to forget
 earlier work for current file.

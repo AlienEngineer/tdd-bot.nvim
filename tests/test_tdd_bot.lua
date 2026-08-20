@@ -6,6 +6,7 @@ local state = {
   commands = {},
   run_calls = {},
   job_calls = {},
+  jobstop_calls = {},
   select_calls = {},
   qflist = {},
   copilot_exists = true,
@@ -30,6 +31,7 @@ local state = {
   closed_windows = {},
   autocmds = {},
   deferred_activity = {},
+  deferred_polls = {},
   -- mtime per path: bumped to simulate copilot changing a file
   mtimes = {},
   open_bufs = {},
@@ -73,6 +75,7 @@ local real = {
   fnamemodify = vim.fn.fnamemodify,
   getqflist = vim.fn.getqflist,
   jobstart = vim.fn.jobstart,
+  jobstop = vim.fn.jobstop,
   chansend = vim.fn.chansend,
   ui_select = vim.ui.select,
   ui_input = vim.ui.input,
@@ -91,6 +94,8 @@ end
 vim.defer_fn = function(fn, delay)
   if delay == 500 then
     table.insert(state.deferred_activity, fn)
+  elseif state.defer_polls then
+    table.insert(state.deferred_polls, fn)
   else
     fn()
   end
@@ -306,6 +311,11 @@ vim.fn.jobstart = function(cmd, opts)
   return state.jobstart_result or #state.job_calls
 end
 
+vim.fn.jobstop = function(job_id)
+  table.insert(state.jobstop_calls, job_id)
+  return 1
+end
+
 vim.fn.chansend = function(_, _) return 0 end
 
 vim.ui.select = function(items, opts, on_choice)
@@ -336,7 +346,9 @@ local function reset_state()
   state.notify_calls = {}
   state.commands = {}
   state.run_calls = {}
+  state.neotest_stop_calls = 0
   state.job_calls = {}
+  state.jobstop_calls = {}
   state.select_calls = {}
   state.input_calls = {}
   state.qflist = {}
@@ -363,6 +375,8 @@ local function reset_state()
   state.closed_windows = {}
   state.autocmds = {}
   state.deferred_activity = {}
+  state.deferred_polls = {}
+  state.defer_polls = false
   state.mtimes = {}
   state.open_bufs = {}
   state.buf_lines = {}
@@ -374,13 +388,18 @@ end
 
 local neotest_mode = "pass"
 local stale_poll_count = 0
+local progress_poll_count = 0
 
 local function install_neotest()
   stale_poll_count = 0
+  progress_poll_count = 0
   package.loaded["neotest"] = {
     run = {
       run = function(path)
         table.insert(state.run_calls, path)
+      end,
+      stop = function()
+        state.neotest_stop_calls = (state.neotest_stop_calls or 0) + 1
       end,
     },
     state = {
@@ -424,6 +443,13 @@ local function install_neotest()
             return { running = 0, failed = 1 }
           end
           return { running = 0, failed = 0, passed = 1 }
+        end
+        if neotest_mode == "progress" then
+          progress_poll_count = progress_poll_count + 1
+          if progress_poll_count == 1 then
+            return { running = 3, passed = 2, failed = 0 }
+          end
+          return { running = 0, passed = 5, failed = 0 }
         end
         if neotest_mode == "fail-results" or neotest_mode == "fail-qf" then
           return { running = 0, failed = 1 }
@@ -511,9 +537,12 @@ local function test_tdd_mode_toggles_and_runs_on_save()
   local bot = load_bot()
   bot.setup()
 
+  local off_status = state.status_calls[1]
   bot.run_tdd()
-  local status = state.status_calls[1]
+  local status = state.status_calls[2]
   assert(bot._is_mode_enabled(), "expected first TDD command to enable mode")
+  assert(not state.valid_windows[off_status.win], "expected off status dot to close when enabling mode")
+  assert(#state.status_calls == 2, "expected enabled mode to create a replacement status dot")
   assert(state.lines_by_buf[status.buf][1] == "● On", "expected enabled status text")
   assert(#state.run_calls == 1, "expected enabling mode to run tests immediately")
 
@@ -527,7 +556,7 @@ local function test_tdd_mode_toggles_and_runs_on_save()
   assert(#state.run_calls == 2, "expected disabled mode to ignore saves")
 end
 
-local function test_tdd_mode_uses_saved_buffer_path_and_ignores_active_cycle()
+local function test_tdd_mode_restarts_suite_for_saved_buffer()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
@@ -537,14 +566,12 @@ local function test_tdd_mode_uses_saved_buffer_path_and_ignores_active_cycle()
   bot.run_tdd()
 
   save_handler()({ buf = 2, file = "/tmp/other_test.dart" })
-  assert(#state.run_calls == 1, "expected save during active recovery to be ignored")
+  assert(#state.run_calls == 2, "expected save during active recovery to restart the suite")
+  assert(state.neotest_stop_calls == 1, "expected active suite to be stopped before restart")
 
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
-  local runs_before_save = #state.run_calls
-  save_handler()({ buf = 2, file = "/tmp/other_test.dart" })
-  assert(#state.run_calls == runs_before_save + 1 and state.run_calls[#state.run_calls] == "/tmp/other_test.dart",
-    "expected saved non-current buffer to run its tests")
+  assert(#state.run_calls == 2, "expected stale Copilot exit not to start another suite")
 end
 
 local function test_tdd_mode_setup_replaces_save_handler()
@@ -816,8 +843,8 @@ local function test_failed_copilot_launch_stops_on_static_red_dot()
   bot.run_tdd()
 
   assert(not bot._is_running(), "expected failed Copilot launch to stop TDD loop")
-  assert(#state.closed_windows == 0, "expected status dot to remain visible after failed Copilot launch")
-  assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusRed",
+  assert(#state.closed_windows == 1, "expected only the off status dot to close when enabling mode")
+  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusRed",
     "expected failed Copilot launch to leave a static red dot")
   assert(#state.notify_calls == 0, "expected failed Copilot launch to avoid notification")
 end
@@ -830,16 +857,19 @@ local function test_running_loop_pulses_single_status_dot()
   bot.setup()
   bot.run_tdd()
 
-  assert(#state.status_calls == 1, "expected one persistent status window")
-  local status = state.status_calls[1]
+  assert(#state.status_calls == 2, "expected off status dot to be replaced when enabling mode")
+  local status = state.status_calls[2]
   assert(not status.enter and not status.opts.focusable, "expected non-focusable status dot")
-  assert(#state.window_calls == 1 and not status.opts.border, "expected no bordered activity window")
+  assert(not state.valid_windows[state.status_calls[1].win], "expected off status dot to close")
+  assert(#state.window_calls == 2 and not status.opts.border, "expected no bordered activity window")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected bright red recovery dot")
   assert(state.highlights.TddBotStatusRedDim.fg == "#802222", "expected dim red pulse highlight")
   assert(state.highlights.TddBotStatusGreenDim.fg == "#287a40", "expected dim green pulse highlight")
   assert(state.highlights.TddBotStatusBlueDim.fg == "#285b8f", "expected dim blue pulse highlight")
 
   table.remove(state.deferred_activity, 1)() -- stale green pulse
+  assert(state.buffer_highlights[status.buf] == "TddBotStatusRed",
+    "expected stale pulse from retired status dot not to repaint active dot")
   table.remove(state.deferred_activity, 1)()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRedDim", "expected dim red pulse")
   table.remove(state.deferred_activity, 1)()
@@ -858,8 +888,8 @@ local function test_passing_run_completes_loop()
   assert(#state.run_calls == 1, "expected one test run")
   assert(#state.job_calls == 0, "expected no refactoring job without refactoring comments")
   assert(not bot._is_running(), "expected passing test run to complete TDD loop")
-  assert(#state.closed_windows == 0, "expected status dot to remain visible after passing run")
-  assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusGreen",
+  assert(#state.closed_windows == 1, "expected only the off status dot to close when enabling mode")
+  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusGreen",
     "expected passing run to settle on a static green dot")
   assert(#state.notify_calls == 0, "expected passing run to avoid notifications")
 end
@@ -883,7 +913,7 @@ local function test_tdd_starts_refactoring_queue_after_passing_tests()
   assert(#state.run_calls == 1, "expected TDD to run tests once before refactoring")
   assert(#state.job_calls == 1, "expected passing TDD to start queued refactoring")
   assert(bot._is_running(), "expected TDD loop to remain active for refactoring review")
-  local status = state.status_calls[1]
+  local status = state.status_calls[2]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue refactoring status")
   assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected pending refactoring count")
   local prompt = arg_after(state.job_calls[1].cmd, "-p")
@@ -918,7 +948,7 @@ local function test_tdd_starts_refactoring_queue_after_fix_recovery()
   assert(#state.run_calls == 2, "expected one TDD rerun after fixing failure")
   assert(#state.job_calls == 2, "expected passing recovery to start queued refactoring")
   assert(bot._is_running(), "expected recovered TDD loop to remain active for review")
-  local status = state.status_calls[1]
+  local status = state.status_calls[2]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue refactoring status after recovery")
   local prompt = arg_after(state.job_calls[2].cmd, "-p")
   assert(prompt:find("extract value helper", 1, true), "expected synced refactoring comment in queued prompt")
@@ -932,21 +962,55 @@ local function test_status_dot_reflects_confirmed_tdd_results()
   bot.setup()
   bot.run_tdd()
 
-  assert(#state.status_calls == 1, "expected one persistent status window")
-  local status = state.status_calls[1]
+  assert(#state.status_calls == 2, "expected one replacement status window after enabling mode")
+  local status = state.status_calls[2]
   assert(not status.enter and not status.opts.focusable, "expected status window not to take focus")
-  assert(status.opts.width == 4 and status.opts.height == 1 and status.opts.relative == "editor",
-    "expected compact floating status window with mode text")
+  assert(status.opts.width >= 4 and status.opts.height == 2 and status.opts.relative == "editor",
+    "expected floating status window with suite result below mode text")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected red status dot highlight")
 
   local stale_red_pulse = state.deferred_activity[#state.deferred_activity]
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
-  assert(#state.status_calls == 1, "expected green update to reuse status window")
+  assert(#state.status_calls == 2, "expected green update to reuse replacement status window")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen", "expected green status dot highlight")
   stale_red_pulse()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen",
     "expected stale red pulse not to overwrite static green status")
+end
+
+local function test_suite_status_shows_live_progress_and_success()
+  reset_state()
+  state.defer_polls = true
+  neotest_mode = "progress"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  assert(state.lines_by_buf[status.buf][1] == "● On", "expected enabled suite status")
+  assert(state.lines_by_buf[status.buf][2] == "--/--", "expected unknown suite count before discovery")
+  assert(status.opts.height == 2, "expected suite status below mode text")
+
+  table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][2] == "2/5...",
+    "expected completed suite tests to update live, got " .. tostring(state.lines_by_buf[status.buf][2]))
+
+  table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][2] == "5 ✓", "expected completed suite to show success check")
+end
+
+local function test_suite_status_shows_failure_count()
+  reset_state()
+  neotest_mode = "fail-results"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  assert(state.lines_by_buf[status.buf][2] == "1/1 ✗", "expected failing suite count and failure symbol")
 end
 
 local function test_status_dot_recovers_after_manual_close()
@@ -957,13 +1021,13 @@ local function test_status_dot_recovers_after_manual_close()
   bot.setup()
   bot.run_tdd()
 
-  local first = state.status_calls[1]
+  local first = state.status_calls[2]
   state.valid_windows[first.win] = false
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
 
-  assert(#state.status_calls == 2, "expected closed status window to be recreated")
-  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusGreen",
+  assert(#state.status_calls == 3, "expected closed status window to be recreated")
+  assert(state.buffer_highlights[state.status_calls[3].buf] == "TddBotStatusGreen",
     "expected recreated status window to show current green state")
 end
 
@@ -998,7 +1062,7 @@ local function test_tdd_loop_exposes_plugin_version()
   bot.setup()
   bot.run_tdd()
 
-  assert(bot.version == "0.1.13", "expected public plugin version")
+  assert(bot.version == "0.1.14", "expected public plugin version")
   assert(#state.notify_calls == 0, "expected loop start to avoid notifications")
 end
 
@@ -1546,7 +1610,6 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
   state.file_contents["/tmp/sample_test.dart"] = {
     "local function helper() return 1 end",
     "local y = 2",
-    "// Refactoring: rename y to total",
   }
   state.job_calls[1].opts.on_exit(1, 0)
   assert(#state.commands == 1 and state.commands[1] == "write",
@@ -1554,6 +1617,13 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
   assert(#state.job_calls == 1, "expected next refactoring to wait for review decision")
   assert(bot._is_running(), "expected loop to stay running while review is unresolved")
   local popup = state.popup_calls[1]
+  local review = table.concat(state.popup_buffers[popup.buf], "\n")
+  assert(review:find("// Refactoring: rename y to total", 1, true),
+    "expected first review to preserve next refactoring directive")
+  assert(state.file_contents["/tmp/sample_test.dart"][3] == "// Refactoring: rename y to total",
+    "expected next refactoring directive restored on disk before review")
+  assert(state.buf_lines[current_buf][3] == "// Refactoring: rename y to total",
+    "expected next refactoring directive restored in buffer before review")
   popup_mapping(popup, "a")()
   assert(#state.commands == 3 and state.commands[2] == "e!" and state.commands[3] == "w",
     "expected accepted refactoring to reload from disk then save")
@@ -1609,6 +1679,31 @@ local function test_refactor_rejection_restores_snapshot_and_advances_once()
     assert(state.lines_by_buf[current_buf][i] == line, "expected rejected candidate removed from buffer")
   end
   assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● Off 1", "expected rejected item removed from queue count")
+end
+
+local function test_duplicate_refactoring_directives_survive_accepted_candidate()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local lines = {
+    "// Refactoring: extract helper",
+    "// Refactoring: extract helper",
+  }
+  state.buf_lines[current_buf] = lines
+  state.file_contents["/tmp/sample_test.dart"] = lines
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "local function helper() end" }
+  state.job_calls[1].opts.on_exit(1, 0)
+  assert(state.file_contents["/tmp/sample_test.dart"][2] == "// Refactoring: extract helper",
+    "expected pending duplicate directive restored before first review")
+  popup_mapping(state.popup_calls[1], "a")()
+
+  assert(#state.job_calls == 2, "expected remaining duplicate directive to start its own job")
+  assert(arg_after(state.job_calls[2].cmd, "-p"):find("Line: 2", 1, true),
+    "expected remaining duplicate directive location recalculated")
 end
 
 local function test_duplicate_refactoring_requests_advance_after_rejection()
@@ -1778,6 +1873,122 @@ local function test_refactor_repairs_related_source_and_tests()
   assert(state.buf_lines[2][1] == "assert(extracted() == 1)", "expected loaded related test buffer synced")
 end
 
+local function test_refactor_repair_preserves_pending_directives()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local lines = {
+    "// Refactoring: extract helper",
+    "// Refactoring: rename helper",
+  }
+  state.buf_lines[current_buf] = lines
+  state.file_contents["/tmp/sample_test.dart"] = lines
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "local function helper() end" }
+  neotest_mode = "fail-results"
+  state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "a")()
+  assert(#state.job_calls == 2, "expected failed first refactoring to start repair")
+
+  state.file_contents["/tmp/sample_test.dart"] = { "local function fixed_helper() end" }
+  neotest_mode = "pass"
+  state.job_calls[2].opts.on_exit(2, 0)
+  assert(state.file_contents["/tmp/sample_test.dart"][2] == "// Refactoring: rename helper",
+    "expected repair candidate to preserve next refactoring directive")
+  popup_mapping(state.popup_calls[2], "a")()
+
+  assert(#state.job_calls == 3, "expected preserved directive to start after repaired refactoring")
+  assert(arg_after(state.job_calls[3].cmd, "-p"):find("rename helper", 1, true),
+    "expected next refactoring prompt after repair")
+end
+
+local function test_refactor_only_reviews_matching_extension_and_restores_generated_output()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local original = { "// Refactoring: rename helper" }
+  state.buf_lines[current_buf] = original
+  state.file_contents["/tmp/sample_test.dart"] = original
+  state.file_contents["/tmp/related_test.dart"] = { "old test" }
+  state.file_contents["/tmp/notes.md"] = { "old notes" }
+  state.file_contents["/tmp/lib/build/generated.dart"] = { "old generated output" }
+  state.open_bufs[2] = "/tmp/lib/build/generated.dart"
+  state.buf_lines[2] = { "old generated output" }
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  local prompt = arg_after(state.job_calls[1].cmd, "-p")
+  assert(prompt:find("only files with .dart extension", 1, true),
+    "expected refactor prompt to limit edits to initiating extension")
+  assert(prompt:find("Do not edit generated build output", 1, true),
+    "expected refactor prompt to exclude generated build output")
+
+  state.file_contents["/tmp/sample_test.dart"] = { "renamed helper" }
+  state.file_contents["/tmp/related_test.dart"] = { "new test" }
+  state.file_contents["/tmp/notes.md"] = { "changed notes" }
+  state.file_contents["/tmp/new_notes.md"] = { "new notes" }
+  state.file_contents["/tmp/lib/build/generated.dart"] = { "changed generated output" }
+  state.file_contents["/tmp/lib/build/new_generated.dart"] = { "new generated output" }
+  state.job_calls[1].opts.on_exit(1, 0)
+
+  local review = table.concat(state.popup_buffers[state.popup_calls[1].buf], "\n")
+  assert(review:find("/tmp/sample_test.dart", 1, true) and review:find("/tmp/related_test.dart", 1, true),
+    "expected review to include matching-extension source and test changes")
+  assert(not review:find("notes.md", 1, true) and not review:find("/build/", 1, true),
+    "expected review to exclude other extensions and generated output")
+  assert(state.file_contents["/tmp/notes.md"][1] == "old notes",
+    "expected other-extension file restored before review")
+  assert(state.file_contents["/tmp/new_notes.md"] == nil,
+    "expected new other-extension file deleted before review")
+  assert(state.file_contents["/tmp/lib/build/generated.dart"][1] == "old generated output",
+    "expected generated output restored before review")
+  assert(state.file_contents["/tmp/lib/build/new_generated.dart"] == nil,
+    "expected new generated output deleted before review")
+  assert(state.buf_lines[2][1] == "old generated output",
+    "expected loaded generated buffer to retain pre-refactoring content")
+
+  popup_mapping(state.popup_calls[1], "r")()
+  assert(state.file_contents["/tmp/sample_test.dart"][1] == original[1],
+    "expected rejected matching-extension source restored")
+  assert(state.file_contents["/tmp/related_test.dart"][1] == "old test",
+    "expected rejected matching-extension test restored")
+end
+
+local function test_extensionless_refactor_excludes_files_with_extensions()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local original_get_name = vim.api.nvim_buf_get_name
+  vim.api.nvim_buf_get_name = function(buf)
+    if buf == 0 or buf == current_buf then
+      return "/tmp/Makefile"
+    end
+    return state.open_bufs[buf] or ""
+  end
+  local original = { "// Refactoring: rename target" }
+  state.buf_lines[current_buf] = original
+  state.file_contents["/tmp/Makefile"] = original
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/Makefile"] = { "all: renamed-target" }
+  state.file_contents["/tmp/unrelated.dart"] = { "changed dart file" }
+  state.job_calls[1].opts.on_exit(1, 0)
+
+  local review = table.concat(state.popup_buffers[state.popup_calls[1].buf], "\n")
+  assert(review:find("/tmp/Makefile", 1, true) and not review:find("unrelated.dart", 1, true),
+    "expected extensionless refactor review to exclude files with extensions")
+  assert(state.file_contents["/tmp/unrelated.dart"] == nil,
+    "expected extensionless refactor to delete new file with an extension")
+  popup_mapping(state.popup_calls[1], "r")()
+  vim.api.nvim_buf_get_name = original_get_name
+end
+
 local function test_refactor_rejection_restores_all_workspace_changes()
   reset_state()
   neotest_mode = "pass"
@@ -1786,6 +1997,8 @@ local function test_refactor_rejection_restores_all_workspace_changes()
   state.buf_lines[current_buf] = original
   state.file_contents["/tmp/sample_test.dart"] = original
   state.file_contents["/tmp/related_test.dart"] = { "old test" }
+  state.file_contents["/tmp/build/generated.dart"] = { "old generated output" }
+  state.file_contents["/tmp/notes.md"] = { "old notes" }
   local bot = load_bot()
   bot.setup()
   bot.run_refactor()
@@ -1810,6 +2023,8 @@ local function test_refactor_repair_limit_restores_workspace()
   state.buf_lines[current_buf] = original
   state.file_contents["/tmp/sample_test.dart"] = original
   state.file_contents["/tmp/related_test.dart"] = { "old test" }
+  state.file_contents["/tmp/build/generated.dart"] = { "old generated output" }
+  state.file_contents["/tmp/notes.md"] = { "old notes" }
   local bot = load_bot()
   bot.setup({ max_refactor_retries = 1 })
   bot.run_refactor()
@@ -1817,19 +2032,32 @@ local function test_refactor_repair_limit_restores_workspace()
   state.file_contents["/tmp/sample_test.dart"] = { "broken source" }
   state.file_contents["/tmp/related_test.dart"] = { "broken test" }
   state.file_contents["/tmp/new_helper.dart"] = { "new file" }
+  state.file_contents["/tmp/build/generated.dart"] = { "broken generated output" }
+  state.file_contents["/tmp/notes.md"] = { "broken notes" }
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
+  assert(state.file_contents["/tmp/build/generated.dart"][1] == "old generated output",
+    "expected generated output restored before failed candidate review")
+  assert(state.file_contents["/tmp/notes.md"][1] == "old notes",
+    "expected other-extension file restored before failed candidate review")
   popup_mapping(state.popup_calls[1], "a")()
   assert(#state.job_calls == 2, "expected one repair attempt")
 
   state.file_contents["/tmp/related_test.dart"] = { "still broken test" }
+  state.file_contents["/tmp/build/generated.dart"] = { "still broken generated output" }
   state.job_calls[2].opts.on_exit(2, 0)
+  assert(state.file_contents["/tmp/build/generated.dart"][1] == "old generated output",
+    "expected generated output restored before repair candidate review")
   popup_mapping(state.popup_calls[2], "a")()
 
   assert(#state.job_calls == 2 and not bot._is_running(), "expected retry limit to stop refactoring")
   assert(state.file_contents["/tmp/sample_test.dart"][1] == original[1], "expected source restored after exhausted repairs")
   assert(state.file_contents["/tmp/related_test.dart"][1] == "old test", "expected test restored after exhausted repairs")
   assert(state.file_contents["/tmp/new_helper.dart"] == nil, "expected new file removed after exhausted repairs")
+  assert(state.file_contents["/tmp/build/generated.dart"][1] == "old generated output",
+    "expected generated output unchanged after exhausted repairs")
+  assert(state.file_contents["/tmp/notes.md"][1] == "old notes",
+    "expected other-extension file unchanged after exhausted repairs")
   assert(#state.notify_calls == 1 and state.notify_calls[1].msg:find("retries exhausted", 1, true),
     "expected one terminal refactoring failure notification")
 end
@@ -1887,7 +2115,7 @@ local function test_readme_guides_user_from_purpose_to_installation_and_keymaps(
   assert(readme:find("<leader>tdc", 1, true), "expected clear-session keymap")
   assert(readme:find("<leader>tdr", 1, true), "expected refactor keymap")
   assert(readme:find("<leader>tdm", 1, true), "expected model selector keymap")
-  assert(readme:find("floating dot", 1, true), "expected TDD status indicator documentation")
+  assert(readme:find("live whole-suite progress", 1, true), "expected suite status indicator documentation")
   assert(readme:find("mode defaults to Off", 1, true), "expected TDD mode default documentation")
   assert(readme:find("every file save", 1, true), "expected save-triggered TDD documentation")
 end
@@ -1930,7 +2158,7 @@ end
 test_tdd_mapping_exists()
 test_tdd_mode_is_off_by_default()
 test_tdd_mode_toggles_and_runs_on_save()
-test_tdd_mode_uses_saved_buffer_path_and_ignores_active_cycle()
+test_tdd_mode_restarts_suite_for_saved_buffer()
 test_tdd_mode_setup_replaces_save_handler()
 test_tdd_saves_buffer_before_running_tests()
 test_tdd_locks_origin_buffer_and_restores_after_recovery()
@@ -1950,6 +2178,8 @@ test_passing_run_completes_loop()
 test_tdd_starts_refactoring_queue_after_passing_tests()
 test_tdd_starts_refactoring_queue_after_fix_recovery()
 test_status_dot_reflects_confirmed_tdd_results()
+test_suite_status_shows_live_progress_and_success()
+test_suite_status_shows_failure_count()
 test_status_dot_recovers_after_manual_close()
 test_failure_in_any_adapter_beats_passing_adapter()
 test_stale_failure_from_prior_run_is_ignored()
@@ -1981,12 +2211,16 @@ test_tdr_mapping_exists()
 test_refactor_saves_buffer_before_running_tests()
 test_refactor_queue_waits_for_acceptance_before_next_job()
 test_refactor_rejection_restores_snapshot_and_advances_once()
+test_duplicate_refactoring_directives_survive_accepted_candidate()
 test_duplicate_refactoring_requests_advance_after_rejection()
 test_closing_refactoring_review_rejects_candidate()
 test_refactor_status_transitions_from_blue_to_red_or_green()
 test_refactor_no_comments_found()
 test_refactor_aborts_when_tests_red()
 test_refactor_repairs_related_source_and_tests()
+test_refactor_repair_preserves_pending_directives()
+test_refactor_only_reviews_matching_extension_and_restores_generated_output()
+test_extensionless_refactor_excludes_files_with_extensions()
 test_refactor_rejection_restores_all_workspace_changes()
 test_refactor_repair_limit_restores_workspace()
 test_clear_session_removes_stored_uuid()
