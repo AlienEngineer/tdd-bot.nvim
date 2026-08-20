@@ -388,10 +388,9 @@ local function find_project_root(file_path)
 end
 
 local function is_project_file(root, path)
-  return path:sub(1, #root) == root
+  return path:sub(1, #root + 1) == root .. "/"
     and not path:find("/.git/", 1, true)
     and not path:find("/node_modules/", 1, true)
-    and path ~= root .. "/.git"
 end
 
 local function snapshot_workspace(root)
@@ -405,6 +404,14 @@ local function snapshot_workspace(root)
   return snapshot
 end
 
+local function file_extension(path)
+  return path:match("%.([^./]+)$") or ""
+end
+
+local function is_refactor_file(path, extension)
+  return not path:find("/build/", 1, true) and file_extension(path) == extension
+end
+
 local function workspace_candidate(root, snapshot)
   local current, paths, changes = snapshot_workspace(root), {}, {}
   for path in pairs(snapshot) do paths[path] = true end
@@ -416,6 +423,18 @@ local function workspace_candidate(root, snapshot)
     end
   end
   return changes
+end
+
+local function partition_workspace_candidate(changes, extension)
+  local allowed, excluded = {}, {}
+  for path, change in pairs(changes) do
+    if is_refactor_file(path, extension) then
+      allowed[path] = change
+    else
+      excluded[path] = change
+    end
+  end
+  return allowed, excluded
 end
 
 local function candidate_diff(changes)
@@ -509,9 +528,12 @@ local function build_copilot_prompt(context)
 end
 
 local function build_refactor_prompt(context)
+  local extension = file_extension(context.file_path)
+  local file_type = extension == "" and "files without an extension" or ("files with ." .. extension .. " extension")
   return table.concat({
     "Apply the following refactoring exactly as described, with minimal unrelated changes.",
-    "Inspect and change every related project file required, including affected tests.",
+    "Inspect and change every related project file required, including affected tests, but only " .. file_type .. ".",
+    "Do not edit generated build output or files with other extensions.",
     "Once applied, remove the refactoring comment that requested it.",
     "Run relevant tests before finishing.",
     "File: " .. context.file_path,
@@ -521,9 +543,12 @@ local function build_refactor_prompt(context)
 end
 
 local function build_refactor_repair_prompt(context, failure)
+  local extension = file_extension(context.file_path)
+  local file_type = extension == "" and "files without an extension" or ("files with ." .. extension .. " extension")
   return table.concat({
     "Finish this refactoring. Previous candidate failed verification.",
-    "Make minimal related implementation and test changes needed to pass.",
+    "Make minimal related implementation and test changes needed to pass, but only " .. file_type .. ".",
+    "Do not edit generated build output or files with other extensions.",
     "Keep requested refactoring and remove its comment.",
     "Run relevant tests before finishing.",
     "File: " .. context.file_path,
@@ -865,8 +890,12 @@ local function run_copilot_job(context, prompt, on_done, review)
           return
         end
         if review then
+          local allowed, excluded = partition_workspace_candidate(
+            workspace_candidate(cwd, workspace_snapshot),
+            file_extension(context.file_path))
+          notify_restore_conflicts(restore_workspace_candidate(excluded))
           on_done(true, {
-            changes = workspace_candidate(cwd, workspace_snapshot),
+            changes = allowed,
           })
         else
           reload_changed_buffers(snapshots, work_label)
