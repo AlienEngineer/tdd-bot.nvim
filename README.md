@@ -25,9 +25,9 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
   background Copilot review; Copilot is instructed to remove each applied comment
 - `<leader>tdm` prompts for a Copilot model ID; `auto` is suggested
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
-- each refactoring opens a focused diff review: press `a` to accept or `r`, `q`, or `<Esc>` to reject; only accepted changes reload and save the buffer, then rerun tests
-- rejected changes restore pre-refactoring disk and buffer content without saving candidate changes; queue advances only after accept or reject
-- a broken accepted refactoring reverts file (disk + buffer) to pre-refactoring content and stops loop
+- each refactoring may change related implementation and test files; review shows one combined workspace diff. Press `a` to accept or `r`, `q`, or `<Esc>` to reject
+- rejected changes restore every candidate file to pre-refactoring content; queue advances only after accept or reject
+- failed accepted refactorings start bounded Copilot repair iterations. Exhaustion restores candidate workspace and stops loop
 - a compact, non-focusable floating dot pulses green while TDD tests run, red
   during failure recovery, and blue during refactoring; blue shows remaining
   refactoring count, which decreases after each verified refactoring and hides
@@ -105,13 +105,14 @@ Add one or more refactoring comments:
 
 Press `<leader>tdr` to start refactoring without a TDD failure-fix cycle.
 tdd-bot runs tests first. If they pass, it prepares each
-comment sequentially through Copilot, then opens a focused diff review. Press
-`a` to accept, or `r`, `q`, or `<Esc>` to reject. Accepted changes reload and
-save buffer content before tests rerun. Rejected changes restore disk and buffer
-content without running tests. Blue status dot shows remaining queued
-refactorings and advances only after each decision. If an accepted change breaks
-tests, tdd-bot restores file and buffer to pre-refactoring state and stops. If
-no refactoring comments exist, tdd-bot notifies you to add one.
+comment sequentially through Copilot, including related implementation and test
+files, then opens one combined workspace diff review. Press `a` to accept, or
+`r`, `q`, or `<Esc>` to reject. Accepted changes rerun tests. A failed
+verification starts up to `max_refactor_retries` Copilot repairs, each reviewed
+as part of same candidate. Rejecting or exhausting repairs restores all candidate
+files and stops only on exhaustion. Blue status dot shows remaining queued
+refactorings and advances only after verified success. If no refactoring comments
+exist, tdd-bot notifies you to add one.
 
 ## Configuration
 
@@ -125,8 +126,13 @@ require("tdd-bot").setup({
   result_timeout_ms = 120000,
   poll_interval_ms = 200,
   max_retries = 5,
+  max_refactor_retries = 5,
 })
 ```
+
+`max_retries` limits TDD failure-fix attempts. `max_refactor_retries` independently
+limits repair attempts after accepted refactoring verification fails; both default
+to `5`.
 
 `copilot_cmd` may set executable and benign CLI arguments. tdd-bot removes
 permission, path, URL, MCP/plugin, agent, model, prompt, and session flags from
