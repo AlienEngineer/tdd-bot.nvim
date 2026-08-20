@@ -6,6 +6,7 @@ local state = {
   commands = {},
   run_calls = {},
   job_calls = {},
+  jobstop_calls = {},
   select_calls = {},
   qflist = {},
   copilot_exists = true,
@@ -27,6 +28,7 @@ local state = {
   closed_windows = {},
   autocmds = {},
   deferred_activity = {},
+  deferred_polls = {},
   -- mtime per path: bumped to simulate copilot changing a file
   mtimes = {},
   open_bufs = {},
@@ -68,6 +70,7 @@ local real = {
   fnamemodify = vim.fn.fnamemodify,
   getqflist = vim.fn.getqflist,
   jobstart = vim.fn.jobstart,
+  jobstop = vim.fn.jobstop,
   chansend = vim.fn.chansend,
   ui_select = vim.ui.select,
   ui_input = vim.ui.input,
@@ -86,6 +89,8 @@ end
 vim.defer_fn = function(fn, delay)
   if delay == 500 then
     table.insert(state.deferred_activity, fn)
+  elseif state.defer_polls then
+    table.insert(state.deferred_polls, fn)
   else
     fn()
   end
@@ -285,6 +290,11 @@ vim.fn.jobstart = function(cmd, opts)
   return state.jobstart_result or #state.job_calls
 end
 
+vim.fn.jobstop = function(job_id)
+  table.insert(state.jobstop_calls, job_id)
+  return 1
+end
+
 vim.fn.chansend = function(_, _) return 0 end
 
 vim.ui.select = function(items, opts, on_choice)
@@ -315,7 +325,9 @@ local function reset_state()
   state.notify_calls = {}
   state.commands = {}
   state.run_calls = {}
+  state.neotest_stop_calls = 0
   state.job_calls = {}
+  state.jobstop_calls = {}
   state.select_calls = {}
   state.input_calls = {}
   state.qflist = {}
@@ -338,6 +350,8 @@ local function reset_state()
   state.closed_windows = {}
   state.autocmds = {}
   state.deferred_activity = {}
+  state.deferred_polls = {}
+  state.defer_polls = false
   state.mtimes = {}
   state.open_bufs = {}
   state.buf_lines = {}
@@ -349,13 +363,18 @@ end
 
 local neotest_mode = "pass"
 local stale_poll_count = 0
+local progress_poll_count = 0
 
 local function install_neotest()
   stale_poll_count = 0
+  progress_poll_count = 0
   package.loaded["neotest"] = {
     run = {
       run = function(path)
         table.insert(state.run_calls, path)
+      end,
+      stop = function()
+        state.neotest_stop_calls = (state.neotest_stop_calls or 0) + 1
       end,
     },
     state = {
@@ -399,6 +418,13 @@ local function install_neotest()
             return { running = 0, failed = 1 }
           end
           return { running = 0, failed = 0, passed = 1 }
+        end
+        if neotest_mode == "progress" then
+          progress_poll_count = progress_poll_count + 1
+          if progress_poll_count == 1 then
+            return { running = 3, passed = 2, failed = 0 }
+          end
+          return { running = 0, passed = 5, failed = 0 }
         end
         if neotest_mode == "fail-results" or neotest_mode == "fail-qf" then
           return { running = 0, failed = 1 }
@@ -505,7 +531,7 @@ local function test_tdd_mode_toggles_and_runs_on_save()
   assert(#state.run_calls == 2, "expected disabled mode to ignore saves")
 end
 
-local function test_tdd_mode_uses_saved_buffer_path_and_ignores_active_cycle()
+local function test_tdd_mode_restarts_suite_for_saved_buffer()
   reset_state()
   neotest_mode = "fail-results"
   install_neotest()
@@ -515,14 +541,12 @@ local function test_tdd_mode_uses_saved_buffer_path_and_ignores_active_cycle()
   bot.run_tdd()
 
   save_handler()({ buf = 2, file = "/tmp/other_test.dart" })
-  assert(#state.run_calls == 1, "expected save during active recovery to be ignored")
+  assert(#state.run_calls == 2, "expected save during active recovery to restart the suite")
+  assert(state.neotest_stop_calls == 1, "expected active suite to be stopped before restart")
 
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
-  local runs_before_save = #state.run_calls
-  save_handler()({ buf = 2, file = "/tmp/other_test.dart" })
-  assert(#state.run_calls == runs_before_save + 1 and state.run_calls[#state.run_calls] == "/tmp/other_test.dart",
-    "expected saved non-current buffer to run its tests")
+  assert(#state.run_calls == 2, "expected stale Copilot exit not to start another suite")
 end
 
 local function test_tdd_mode_setup_replaces_save_handler()
@@ -815,8 +839,8 @@ local function test_status_dot_reflects_confirmed_tdd_results()
   assert(#state.status_calls == 2, "expected one replacement status window after enabling mode")
   local status = state.status_calls[2]
   assert(not status.enter and not status.opts.focusable, "expected status window not to take focus")
-  assert(status.opts.width == 4 and status.opts.height == 1 and status.opts.relative == "editor",
-    "expected compact floating status window with mode text")
+  assert(status.opts.width >= 4 and status.opts.height == 2 and status.opts.relative == "editor",
+    "expected floating status window with suite result below mode text")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected red status dot highlight")
 
   local stale_red_pulse = state.deferred_activity[#state.deferred_activity]
@@ -827,6 +851,40 @@ local function test_status_dot_reflects_confirmed_tdd_results()
   stale_red_pulse()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen",
     "expected stale red pulse not to overwrite static green status")
+end
+
+local function test_suite_status_shows_live_progress_and_success()
+  reset_state()
+  state.defer_polls = true
+  neotest_mode = "progress"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  assert(state.lines_by_buf[status.buf][1] == "● On", "expected enabled suite status")
+  assert(state.lines_by_buf[status.buf][2] == "--/--", "expected unknown suite count before discovery")
+  assert(status.opts.height == 2, "expected suite status below mode text")
+
+  table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][2] == "2/5...",
+    "expected completed suite tests to update live, got " .. tostring(state.lines_by_buf[status.buf][2]))
+
+  table.remove(state.deferred_polls, 1)()
+  assert(state.lines_by_buf[status.buf][2] == "5 ✓", "expected completed suite to show success check")
+end
+
+local function test_suite_status_shows_failure_count()
+  reset_state()
+  neotest_mode = "fail-results"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  local status = state.status_calls[2]
+  assert(state.lines_by_buf[status.buf][2] == "1/1 ✗", "expected failing suite count and failure symbol")
 end
 
 local function test_status_dot_recovers_after_manual_close()
@@ -878,7 +936,7 @@ local function test_tdd_loop_exposes_plugin_version()
   bot.setup()
   bot.run_tdd()
 
-  assert(bot.version == "0.1.13", "expected public plugin version")
+  assert(bot.version == "0.1.14", "expected public plugin version")
   assert(#state.notify_calls == 0, "expected loop start to avoid notifications")
 end
 
@@ -1931,7 +1989,7 @@ local function test_readme_guides_user_from_purpose_to_installation_and_keymaps(
   assert(readme:find("<leader>tdc", 1, true), "expected clear-session keymap")
   assert(readme:find("<leader>tdr", 1, true), "expected refactor keymap")
   assert(readme:find("<leader>tdm", 1, true), "expected model selector keymap")
-  assert(readme:find("floating dot", 1, true), "expected TDD status indicator documentation")
+  assert(readme:find("live whole-suite progress", 1, true), "expected suite status indicator documentation")
   assert(readme:find("mode defaults to Off", 1, true), "expected TDD mode default documentation")
   assert(readme:find("every file save", 1, true), "expected save-triggered TDD documentation")
 end
@@ -1974,7 +2032,7 @@ end
 test_tdd_mapping_exists()
 test_tdd_mode_is_off_by_default()
 test_tdd_mode_toggles_and_runs_on_save()
-test_tdd_mode_uses_saved_buffer_path_and_ignores_active_cycle()
+test_tdd_mode_restarts_suite_for_saved_buffer()
 test_tdd_mode_setup_replaces_save_handler()
 test_tdd_saves_buffer_before_running_tests()
 test_model_mapping_prompts_for_typed_model_and_remembers_it()
@@ -1989,6 +2047,8 @@ test_passing_run_completes_loop()
 test_tdd_starts_refactoring_queue_after_passing_tests()
 test_tdd_starts_refactoring_queue_after_fix_recovery()
 test_status_dot_reflects_confirmed_tdd_results()
+test_suite_status_shows_live_progress_and_success()
+test_suite_status_shows_failure_count()
 test_status_dot_recovers_after_manual_close()
 test_failure_in_any_adapter_beats_passing_adapter()
 test_stale_failure_from_prior_run_is_ignored()

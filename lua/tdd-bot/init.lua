@@ -1,5 +1,5 @@
 local M = {}
-local VERSION = "0.1.13"
+local VERSION = "0.1.14"
 
 M.version = VERSION
 
@@ -99,11 +99,12 @@ local status_state = nil
 local status_pulse_state = nil
 local status_pulse_bright = true
 local status_pulse_generation = 0
-local status_pending_refactorings = nil
+local status_detail = nil
 local preferred_model = "auto"
 local saved_models = { "auto" }
 local tdd_mode_enabled = false
 local tdd_mode_augroup = nil
+local tdd_run_generation = 0
 
 local status_highlights = {
   red = { bright = "TddBotStatusRed", dim = "TddBotStatusRedDim" },
@@ -111,12 +112,15 @@ local status_highlights = {
   blue = { bright = "TddBotStatusBlue", dim = "TddBotStatusBlueDim" },
 }
 
-local function status_window_config(text)
-  local width = vim.fn.strdisplaywidth(text)
+local function status_window_config(lines)
+  local width = 1
+  for _, line in ipairs(lines) do
+    width = math.max(width, vim.fn.strdisplaywidth(line))
+  end
   return {
     relative = "editor",
     width = width,
-    height = 1,
+    height = #lines,
     col = math.max(vim.o.columns - width - 2, 0),
     row = 1,
     style = "minimal",
@@ -129,7 +133,7 @@ local function clear_status()
   status_pulse_generation = status_pulse_generation + 1
   status_pulse_state = nil
   status_pulse_bright = true
-  status_pending_refactorings = nil
+  status_detail = nil
   status_state = nil
 
   if status_winid and vim.api.nvim_win_is_valid(status_winid) then
@@ -139,14 +143,24 @@ local function clear_status()
   status_bufnr = nil
 end
 
-local function render_status(state_name, bright, pending_refactorings)
+local function render_status(state_name, bright, detail)
   local highlights = status_highlights[state_name]
   if not highlights then
     return
   end
-  local text = "● " .. (tdd_mode_enabled and "On" or "Off")
-  if state_name == "blue" and type(pending_refactorings) == "number" and pending_refactorings > 0 then
-    text = string.format("%s %d", text, pending_refactorings)
+  local lines = { "● " .. (tdd_mode_enabled and "On" or "Off") }
+  if state_name == "blue" and type(detail) == "number" and detail > 0 then
+    lines[1] = string.format("%s %d", lines[1], detail)
+  elseif type(detail) == "table" and detail.kind == "suite" then
+    if detail.failed > 0 then
+      lines[2] = string.format("%d/%d ✗", detail.failed, detail.total)
+    elseif detail.complete then
+      lines[2] = string.format("%d ✓", detail.total)
+    elseif detail.total > 0 then
+      lines[2] = string.format("%s/%d...", detail.completed > 0 and detail.completed or "--", detail.total)
+    else
+      lines[2] = "--/--"
+    end
   end
 
   vim.api.nvim_set_hl(0, "TddBotStatusRed", { fg = "#ff0000" })
@@ -163,11 +177,13 @@ local function render_status(state_name, bright, pending_refactorings)
     vim.api.nvim_set_option_value("swapfile", false, { buf = status_bufnr })
   end
 
-  vim.api.nvim_buf_set_lines(status_bufnr, 0, -1, false, { text })
+  vim.api.nvim_buf_set_lines(status_bufnr, 0, -1, false, lines)
   vim.api.nvim_buf_clear_namespace(status_bufnr, -1, 0, -1)
-  vim.api.nvim_buf_add_highlight(status_bufnr, -1, bright and highlights.bright or highlights.dim, 0, 0, -1)
+  for line = 0, #lines - 1 do
+    vim.api.nvim_buf_add_highlight(status_bufnr, -1, bright and highlights.bright or highlights.dim, line, 0, -1)
+  end
 
-  local window_config = status_window_config(text)
+  local window_config = status_window_config(lines)
   if status_winid and vim.api.nvim_win_is_valid(status_winid) then
     vim.api.nvim_win_set_config(status_winid, window_config)
   else
@@ -177,24 +193,24 @@ local function render_status(state_name, bright, pending_refactorings)
   status_state = state_name
 end
 
-local function set_status(state_name, pending_refactorings)
+local function set_status(state_name, detail)
   if not status_highlights[state_name] then
     return
   end
   status_pulse_generation = status_pulse_generation + 1
   status_pulse_state = nil
   status_pulse_bright = true
-  status_pending_refactorings = pending_refactorings
-  render_status(state_name, true, pending_refactorings)
+  status_detail = detail
+  render_status(state_name, true, detail)
 end
 
-local function start_status_pulse(state_name, pending_refactorings)
+local function start_status_pulse(state_name, detail)
   if not status_highlights[state_name] then
     return
   end
-  status_pending_refactorings = pending_refactorings
+  status_detail = detail
   if status_pulse_state == state_name then
-    render_status(state_name, status_pulse_bright, pending_refactorings)
+    render_status(state_name, status_pulse_bright, detail)
     return
   end
 
@@ -202,14 +218,14 @@ local function start_status_pulse(state_name, pending_refactorings)
   status_pulse_state = state_name
   status_pulse_bright = true
   local generation = status_pulse_generation
-  render_status(state_name, true, pending_refactorings)
+  render_status(state_name, true, detail)
 
   local function pulse()
     if generation ~= status_pulse_generation or status_pulse_state ~= state_name then
       return
     end
     status_pulse_bright = not status_pulse_bright
-    render_status(state_name, status_pulse_bright, status_pending_refactorings)
+    render_status(state_name, status_pulse_bright, status_detail)
     vim.defer_fn(pulse, 500)
   end
 
@@ -683,10 +699,10 @@ local function first_failed_result(results)
           message = first_error.message or first_error.output or vim.inspect(first_error)
         end
       end
-      return test_id, message or "No failure message provided."
+      return test_id, message or "No failure message provided.", result
     end
   end
-  return nil, nil
+  return nil, nil, nil
 end
 
 local function all_results_passed(results)
@@ -712,8 +728,8 @@ local function has_any_results(results)
   return next(results) ~= nil
 end
 
-local function fetch_results_for_file(neotest, adapter_id, file_path)
-  local ok, results = pcall(neotest.state.results, adapter_id, file_path)
+local function fetch_suite_results(neotest, adapter_id, root)
+  local ok, results = pcall(neotest.state.results, adapter_id, root)
   if ok and type(results) == "table" then
     return results
   end
@@ -750,7 +766,7 @@ local function first_failed_quickfix(file_path)
   return nil
 end
 
-local function capture_failure_for_file(file_path, bufnr, done)
+local function capture_suite_failure(file_path, done, generation)
   local ok, neotest = pcall(require, "neotest")
   if not ok then
     done(nil)
@@ -758,18 +774,34 @@ local function capture_failure_for_file(file_path, bufnr, done)
   end
 
   last_failure = nil
-  neotest.run.run(file_path)
+  local root = find_project_root(file_path)
+  local run_ok = pcall(neotest.run.run, root)
+  if not run_ok then
+    done({
+      file_path = file_path,
+      test_id = "<suite>",
+      message = "Unable to start the project test suite through neotest.",
+      updated_at = now_ms(),
+    }, { passed = 0, failed = 1, total = 0 })
+    return
+  end
 
   local started_at = now_ms()
   local saw_running = false
   local poll_count = 0
 
   local function finish(failure, counts)
+    if generation and generation ~= tdd_run_generation then
+      return
+    end
     last_failure = failure
     done(failure, counts)
   end
 
   local function inspect_results()
+    if generation and generation ~= tdd_run_generation then
+      return
+    end
     poll_count = poll_count + 1
     -- Neotest's status/results cache is global and cumulative across runs; on
     -- the very first poll it may still reflect the previous invocation before
@@ -783,15 +815,17 @@ local function capture_failure_for_file(file_path, bufnr, done)
     local total_passed = 0
     local total_failed = 0
     local total_skipped = 0
+    local total_running = 0
     local all_adapters_passed = true
     local has_results = false
 
     for _, adapter_id in ipairs(adapter_ids) do
       if neotest.state.status_counts then
-        local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id, { buffer = bufnr })
+        local ok_counts, counts = pcall(neotest.state.status_counts, adapter_id, root)
         if ok_counts and counts and type(counts.running) == "number" and counts.running > 0 then
           has_running = true
           saw_running = true
+          total_running = total_running + counts.running
         end
         if ok_counts and counts and type(counts.failed) == "number" and counts.failed > 0 then
           has_failed = true
@@ -809,15 +843,25 @@ local function capture_failure_for_file(file_path, bufnr, done)
         end
       end
 
-      local results = fetch_results_for_file(neotest, adapter_id, file_path)
-      local test_id, failure_message = first_failed_result(results)
+      local results = fetch_suite_results(neotest, adapter_id, root)
+      local test_id, failure_message, failed_result = first_failed_result(results)
       if test_id and trust_results then
+        local total = total_passed + total_failed + total_skipped + total_running
+        if generation and total > 0 then
+          start_status_pulse("red", {
+            kind = "suite",
+            total = total,
+            completed = total_passed + total_failed + total_skipped,
+            failed = total_failed,
+            complete = not has_running,
+          })
+        end
         finish({
-          file_path = file_path,
+          file_path = failed_result and failed_result.path or file_path,
           test_id = test_id,
           message = failure_message,
           updated_at = now_ms(),
-        }, { passed = total_passed, failed = total_failed })
+        }, { passed = total_passed, failed = total_failed, total = total })
         return
       end
 
@@ -828,6 +872,18 @@ local function capture_failure_for_file(file_path, bufnr, done)
       end
     end
 
+    local total = total_passed + total_failed + total_skipped + total_running
+    local completed = total_passed + total_failed + total_skipped
+    if total > 0 and generation then
+      start_status_pulse(has_failed and "red" or "green", {
+        kind = "suite",
+        total = total,
+        completed = completed,
+        failed = total_failed,
+        complete = not has_running,
+      })
+    end
+
     if has_failed and trust_results and (saw_running or not has_running) then
       local qf = first_failed_quickfix(file_path)
       finish({
@@ -835,36 +891,36 @@ local function capture_failure_for_file(file_path, bufnr, done)
         test_id = qf and ("line " .. tostring(qf.lnum or "?")) or "<unknown>",
         message = qf and (qf.text or "Tests failed.") or "Tests failed. No failure output found.",
         updated_at = now_ms(),
-      }, { passed = total_passed, failed = total_failed })
+      }, { passed = total_passed, failed = total_failed, total = total })
       return
     end
 
     if saw_running and not has_running and trust_results then
-      finish(nil, { passed = total_passed, failed = total_failed })
+      finish(nil, { passed = total_passed, failed = total_failed, total = total })
       return
     end
 
     if has_results and all_adapters_passed and not has_running and trust_results then
-      finish(nil, { passed = total_passed, failed = total_failed })
+      finish(nil, { passed = total_passed, failed = total_failed, total = total })
       return
     end
 
     if not has_failed and not has_running and (total_passed > 0 or total_skipped > 0) and trust_results then
-      finish(nil, { passed = total_passed, failed = total_failed })
+      finish(nil, { passed = total_passed, failed = total_failed, total = total })
       return
     end
 
     if now_ms() - started_at < config.result_timeout_ms then
       vim.defer_fn(inspect_results, config.poll_interval_ms)
     else
-      finish(nil, { passed = total_passed, failed = total_failed })
+      finish(nil, { passed = total_passed, failed = total_failed, total = total })
     end
   end
 
   vim.defer_fn(inspect_results, config.poll_interval_ms)
 end
 
-local function run_copilot_job(context, prompt, on_done, review)
+local function run_copilot_job(context, prompt, on_done, review, generation)
   if vim.fn.executable("copilot") ~= 1 then
     on_done(false)
     return
@@ -892,6 +948,9 @@ local function run_copilot_job(context, prompt, on_done, review)
       end,
       on_exit = function(_, _)
         copilot_job_id = nil
+        if generation and generation ~= tdd_run_generation then
+          return
+        end
         if model ~= "auto" and output_has_unavailable_model_error(table.concat(output, "\n")) then
           forget_model(model)
           preferred_model = "auto"
@@ -927,12 +986,14 @@ local function run_copilot_job(context, prompt, on_done, review)
   start_job(preferred_model)
 end
 
-local function start_copilot_background(failure, on_done)
+local function start_copilot_background(failure, on_done, generation)
   local prompt = build_copilot_prompt(failure)
   run_copilot_job(
     failure,
     prompt,
-    on_done)
+    on_done,
+    false,
+    generation)
 end
 
 local function start_copilot_refactor(refactor, on_done)
@@ -950,21 +1011,25 @@ end
 
 local start_refactoring_if_present
 
-local function run_fix_cycle(file_path, bufnr, attempt)
-  capture_failure_for_file(file_path, bufnr, function(failure, counts)
+local function run_fix_cycle(file_path, bufnr, attempt, generation)
+  capture_suite_failure(file_path, function(failure, counts)
+    if generation ~= tdd_run_generation then
+      return
+    end
     local passed = counts and counts.passed or 0
     local failed = counts and counts.failed or 0
+    local total = counts and counts.total or (passed + failed)
     if not failure then
       if not start_refactoring_if_present(file_path, bufnr) then
         loop_running = false
-        set_status("green")
+        set_status("green", { kind = "suite", total = total, completed = total, failed = 0, complete = true })
       end
       return
     end
-    start_status_pulse("red")
+    start_status_pulse("red", status_detail)
     if attempt >= config.max_retries then
       loop_running = false
-      set_status("red")
+      set_status("red", { kind = "suite", total = total, completed = total, failed = failed, complete = true })
       notify_terminal_failure(string.format(
         "Max retries exhausted. Giving up. (%d passed, %d failed)\nLast failure (%s): %s",
         passed, failed, tostring(failure.test_id), tostring(failure.message)))
@@ -972,13 +1037,15 @@ local function run_fix_cycle(file_path, bufnr, attempt)
     end
     start_copilot_background(failure, function(launched)
       if launched then
-        run_fix_cycle(file_path, bufnr, attempt + 1)
+        if generation == tdd_run_generation then
+          run_fix_cycle(file_path, bufnr, attempt + 1, generation)
+        end
       else
         loop_running = false
-        set_status("red")
+        set_status("red", { kind = "suite", total = total, completed = total, failed = failed, complete = true })
       end
-    end)
-  end)
+    end, generation)
+  end, generation)
 end
 
 local function reload_and_format_refactor()
@@ -1100,7 +1167,7 @@ local function run_refactor_cycle(file_path, bufnr, refactorings, index)
     show_refactoring_review(file_path, diff, refactor.text, function()
       sync_candidate_buffers(candidate_state.changes)
       reload_and_format_refactor()
-      capture_failure_for_file(file_path, bufnr, function(failure, counts)
+      capture_suite_failure(file_path, function(failure, counts)
         if failure then
           start_status_pulse("red")
           if repair_attempt >= config.max_refactor_retries then
@@ -1144,27 +1211,46 @@ start_refactoring_if_present = function(file_path, bufnr)
   return true
 end
 
-local function start_tdd_cycle(file_path, bufnr, save_buffer)
+local function cancel_tdd_run()
+  tdd_run_generation = tdd_run_generation + 1
+  if copilot_job_id then
+    vim.fn.jobstop(copilot_job_id)
+    copilot_job_id = nil
+  end
+  local ok, neotest = pcall(require, "neotest")
+  if ok and neotest.run.stop then
+    pcall(neotest.run.stop)
+  end
+  loop_running = false
+end
+
+local function start_tdd_cycle(file_path, bufnr, save_buffer, restart)
   if file_path == nil or file_path == "" then
     return
   end
 
-  if loop_running or copilot_job_id then
+  if (loop_running or copilot_job_id) and not restart then
     return
+  end
+  if restart then
+    cancel_tdd_run()
   end
 
   loop_running = true
+  tdd_run_generation = tdd_run_generation + 1
+  local generation = tdd_run_generation
   if save_buffer then
     vim.cmd("write")
   end
-  start_status_pulse("green")
-  run_fix_cycle(file_path, bufnr, 0)
+  start_status_pulse("green", { kind = "suite", total = 0, completed = 0, failed = 0, complete = false })
+  run_fix_cycle(file_path, bufnr, 0, generation)
 end
 
 function M.run_tdd()
   if tdd_mode_enabled then
     tdd_mode_enabled = false
-    render_status(status_state or "green", status_pulse_bright, status_pending_refactorings)
+    cancel_tdd_run()
+    set_status("green")
     return
   end
 
@@ -1187,7 +1273,7 @@ function M.run_refactor()
   vim.cmd("write")
   local bufnr = vim.api.nvim_get_current_buf()
   loop_running = true
-  capture_failure_for_file(file_path, bufnr, function(failure, counts)
+  capture_suite_failure(file_path, function(failure, counts)
     if failure then
       loop_running = false
       set_status("red")
@@ -1269,10 +1355,10 @@ function M.setup(opts)
       if file_path == nil or file_path == "" then
         file_path = vim.api.nvim_buf_get_name(bufnr)
       end
-      start_tdd_cycle(file_path, bufnr, false)
+      start_tdd_cycle(file_path, bufnr, false, true)
     end,
   })
-  render_status(status_state or "green", status_pulse_bright, status_pending_refactorings)
+  render_status(status_state or "green", status_pulse_bright, status_detail)
 end
 
 function M._get_last_failure()
