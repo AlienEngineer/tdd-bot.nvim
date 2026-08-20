@@ -486,9 +486,12 @@ local function test_tdd_mode_toggles_and_runs_on_save()
   local bot = load_bot()
   bot.setup()
 
+  local off_status = state.status_calls[1]
   bot.run_tdd()
-  local status = state.status_calls[1]
+  local status = state.status_calls[2]
   assert(bot._is_mode_enabled(), "expected first TDD command to enable mode")
+  assert(not state.valid_windows[off_status.win], "expected off status dot to close when enabling mode")
+  assert(#state.status_calls == 2, "expected enabled mode to create a replacement status dot")
   assert(state.lines_by_buf[status.buf][1] == "● On", "expected enabled status text")
   assert(#state.run_calls == 1, "expected enabling mode to run tests immediately")
 
@@ -690,8 +693,8 @@ local function test_failed_copilot_launch_stops_on_static_red_dot()
   bot.run_tdd()
 
   assert(not bot._is_running(), "expected failed Copilot launch to stop TDD loop")
-  assert(#state.closed_windows == 0, "expected status dot to remain visible after failed Copilot launch")
-  assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusRed",
+  assert(#state.closed_windows == 1, "expected only the off status dot to close when enabling mode")
+  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusRed",
     "expected failed Copilot launch to leave a static red dot")
   assert(#state.notify_calls == 0, "expected failed Copilot launch to avoid notification")
 end
@@ -704,16 +707,19 @@ local function test_running_loop_pulses_single_status_dot()
   bot.setup()
   bot.run_tdd()
 
-  assert(#state.status_calls == 1, "expected one persistent status window")
-  local status = state.status_calls[1]
+  assert(#state.status_calls == 2, "expected off status dot to be replaced when enabling mode")
+  local status = state.status_calls[2]
   assert(not status.enter and not status.opts.focusable, "expected non-focusable status dot")
-  assert(#state.window_calls == 1 and not status.opts.border, "expected no bordered activity window")
+  assert(not state.valid_windows[state.status_calls[1].win], "expected off status dot to close")
+  assert(#state.window_calls == 2 and not status.opts.border, "expected no bordered activity window")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected bright red recovery dot")
   assert(state.highlights.TddBotStatusRedDim.fg == "#802222", "expected dim red pulse highlight")
   assert(state.highlights.TddBotStatusGreenDim.fg == "#287a40", "expected dim green pulse highlight")
   assert(state.highlights.TddBotStatusBlueDim.fg == "#285b8f", "expected dim blue pulse highlight")
 
   table.remove(state.deferred_activity, 1)() -- stale green pulse
+  assert(state.buffer_highlights[status.buf] == "TddBotStatusRed",
+    "expected stale pulse from retired status dot not to repaint active dot")
   table.remove(state.deferred_activity, 1)()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRedDim", "expected dim red pulse")
   table.remove(state.deferred_activity, 1)()
@@ -732,8 +738,8 @@ local function test_passing_run_completes_loop()
   assert(#state.run_calls == 1, "expected one test run")
   assert(#state.job_calls == 0, "expected no refactoring job without refactoring comments")
   assert(not bot._is_running(), "expected passing test run to complete TDD loop")
-  assert(#state.closed_windows == 0, "expected status dot to remain visible after passing run")
-  assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusGreen",
+  assert(#state.closed_windows == 1, "expected only the off status dot to close when enabling mode")
+  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusGreen",
     "expected passing run to settle on a static green dot")
   assert(#state.notify_calls == 0, "expected passing run to avoid notifications")
 end
@@ -757,7 +763,7 @@ local function test_tdd_starts_refactoring_queue_after_passing_tests()
   assert(#state.run_calls == 1, "expected TDD to run tests once before refactoring")
   assert(#state.job_calls == 1, "expected passing TDD to start queued refactoring")
   assert(bot._is_running(), "expected TDD loop to remain active for refactoring review")
-  local status = state.status_calls[1]
+  local status = state.status_calls[2]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue refactoring status")
   assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected pending refactoring count")
   local prompt = arg_after(state.job_calls[1].cmd, "-p")
@@ -792,7 +798,7 @@ local function test_tdd_starts_refactoring_queue_after_fix_recovery()
   assert(#state.run_calls == 2, "expected one TDD rerun after fixing failure")
   assert(#state.job_calls == 2, "expected passing recovery to start queued refactoring")
   assert(bot._is_running(), "expected recovered TDD loop to remain active for review")
-  local status = state.status_calls[1]
+  local status = state.status_calls[2]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue refactoring status after recovery")
   local prompt = arg_after(state.job_calls[2].cmd, "-p")
   assert(prompt:find("extract value helper", 1, true), "expected synced refactoring comment in queued prompt")
@@ -806,8 +812,8 @@ local function test_status_dot_reflects_confirmed_tdd_results()
   bot.setup()
   bot.run_tdd()
 
-  assert(#state.status_calls == 1, "expected one persistent status window")
-  local status = state.status_calls[1]
+  assert(#state.status_calls == 2, "expected one replacement status window after enabling mode")
+  local status = state.status_calls[2]
   assert(not status.enter and not status.opts.focusable, "expected status window not to take focus")
   assert(status.opts.width == 4 and status.opts.height == 1 and status.opts.relative == "editor",
     "expected compact floating status window with mode text")
@@ -816,7 +822,7 @@ local function test_status_dot_reflects_confirmed_tdd_results()
   local stale_red_pulse = state.deferred_activity[#state.deferred_activity]
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
-  assert(#state.status_calls == 1, "expected green update to reuse status window")
+  assert(#state.status_calls == 2, "expected green update to reuse replacement status window")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen", "expected green status dot highlight")
   stale_red_pulse()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen",
@@ -831,13 +837,13 @@ local function test_status_dot_recovers_after_manual_close()
   bot.setup()
   bot.run_tdd()
 
-  local first = state.status_calls[1]
+  local first = state.status_calls[2]
   state.valid_windows[first.win] = false
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
 
-  assert(#state.status_calls == 2, "expected closed status window to be recreated")
-  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusGreen",
+  assert(#state.status_calls == 3, "expected closed status window to be recreated")
+  assert(state.buffer_highlights[state.status_calls[3].buf] == "TddBotStatusGreen",
     "expected recreated status window to show current green state")
 end
 

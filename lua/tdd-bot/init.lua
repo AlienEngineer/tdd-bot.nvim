@@ -125,6 +125,20 @@ local function status_window_config(text)
   }
 end
 
+local function clear_status()
+  status_pulse_generation = status_pulse_generation + 1
+  status_pulse_state = nil
+  status_pulse_bright = true
+  status_pending_refactorings = nil
+  status_state = nil
+
+  if status_winid and vim.api.nvim_win_is_valid(status_winid) then
+    vim.api.nvim_win_close(status_winid, true)
+  end
+  status_winid = nil
+  status_bufnr = nil
+end
+
 local function render_status(state_name, bright, pending_refactorings)
   local highlights = status_highlights[state_name]
   if not highlights then
@@ -1155,6 +1169,7 @@ function M.run_tdd()
   end
 
   tdd_mode_enabled = true
+  clear_status()
   local bufnr = vim.api.nvim_get_current_buf()
   start_tdd_cycle(vim.api.nvim_buf_get_name(bufnr), bufnr, true)
 end
