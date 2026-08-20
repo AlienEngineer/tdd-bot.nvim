@@ -54,6 +54,8 @@ local real = {
   nvim_win_set_config = vim.api.nvim_win_set_config,
   nvim_win_close = vim.api.nvim_win_close,
   nvim_create_autocmd = vim.api.nvim_create_autocmd,
+  nvim_create_augroup = vim.api.nvim_create_augroup,
+  nvim_del_augroup_by_id = vim.api.nvim_del_augroup_by_id,
   nvim_set_hl = vim.api.nvim_set_hl,
   nvim_buf_clear_namespace = vim.api.nvim_buf_clear_namespace,
   nvim_buf_add_highlight = vim.api.nvim_buf_add_highlight,
@@ -73,6 +75,7 @@ local real = {
 
 local fake_now = 0
 local current_buf = 1
+local next_augroup = 1
 
 vim.notify = function(msg, level, opts)
   table.insert(state.notify_calls, { msg = msg, level = level, opts = opts or {} })
@@ -184,6 +187,20 @@ end
 
 vim.api.nvim_create_autocmd = function(event, opts)
   table.insert(state.autocmds, { event = event, opts = opts })
+end
+
+vim.api.nvim_create_augroup = function(_, _)
+  local group = next_augroup
+  next_augroup = next_augroup + 1
+  return group
+end
+
+vim.api.nvim_del_augroup_by_id = function(group)
+  for index = #state.autocmds, 1, -1 do
+    if state.autocmds[index].opts.group == group then
+      table.remove(state.autocmds, index)
+    end
+  end
 end
 
 vim.api.nvim_set_hl = function(_, name, opts)
@@ -301,6 +318,7 @@ local function reset_state()
   state.file_contents = {}
   fake_now = 0
   current_buf = 1
+  next_augroup = 1
 end
 
 local neotest_mode = "pass"
@@ -379,6 +397,15 @@ local function mapped_handler(lhs)
   return nil
 end
 
+local function save_handler()
+  for _, autocmd in ipairs(state.autocmds) do
+    if autocmd.event == "BufWritePost" then
+      return autocmd.opts.callback
+    end
+  end
+  return nil
+end
+
 local function popup_mapping(popup, key)
   for _, map in ipairs(state.mapped) do
     if map.lhs == key and map.opts.buffer == popup.buf then
@@ -412,6 +439,75 @@ local function test_tdd_mapping_exists()
   local bot = load_bot()
   bot.setup()
   assert(mapped_handler("<leader>tdd"), "expected <leader>tdd mapping")
+end
+
+local function test_tdd_mode_is_off_by_default()
+  reset_state()
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+
+  assert(not bot._is_mode_enabled(), "expected TDD mode to default to off")
+  assert(#state.autocmds == 1 and save_handler(), "expected one save handler")
+  local status = state.status_calls[1]
+  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected status to show off mode")
+end
+
+local function test_tdd_mode_toggles_and_runs_on_save()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+
+  bot.run_tdd()
+  local status = state.status_calls[1]
+  assert(bot._is_mode_enabled(), "expected first TDD command to enable mode")
+  assert(state.lines_by_buf[status.buf][1] == "● On", "expected enabled status text")
+  assert(#state.run_calls == 1, "expected enabling mode to run tests immediately")
+
+  save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
+  assert(#state.run_calls == 2, "expected enabled mode to run tests after save")
+
+  bot.run_tdd()
+  assert(not bot._is_mode_enabled(), "expected second TDD command to disable mode")
+  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected disabled status text")
+  save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
+  assert(#state.run_calls == 2, "expected disabled mode to ignore saves")
+end
+
+local function test_tdd_mode_uses_saved_buffer_path_and_ignores_active_cycle()
+  reset_state()
+  neotest_mode = "fail-results"
+  install_neotest()
+  state.open_bufs[2] = "/tmp/other_test.dart"
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  save_handler()({ buf = 2, file = "/tmp/other_test.dart" })
+  assert(#state.run_calls == 1, "expected save during active recovery to be ignored")
+
+  neotest_mode = "pass"
+  state.job_calls[1].opts.on_exit(1, 0)
+  local runs_before_save = #state.run_calls
+  save_handler()({ buf = 2, file = "/tmp/other_test.dart" })
+  assert(#state.run_calls == runs_before_save + 1 and state.run_calls[#state.run_calls] == "/tmp/other_test.dart",
+    "expected saved non-current buffer to run its tests")
+end
+
+local function test_tdd_mode_setup_replaces_save_handler()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.setup()
+  bot.run_tdd()
+
+  assert(#state.autocmds == 1, "expected repeated setup to retain one save handler")
+  save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
+  assert(#state.run_calls == 2, "expected one test run per save after repeated setup")
 end
 
 local function test_tdd_saves_buffer_before_running_tests()
@@ -637,7 +733,7 @@ local function test_tdd_starts_refactoring_queue_after_passing_tests()
   assert(bot._is_running(), "expected TDD loop to remain active for refactoring review")
   local status = state.status_calls[1]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue refactoring status")
-  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected pending refactoring count")
+  assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected pending refactoring count")
   local prompt = arg_after(state.job_calls[1].cmd, "-p")
   assert(prompt:find("extract value helper", 1, true), "expected queued refactoring in Copilot prompt")
   assert(prompt:find("Line: 2", 1, true), "expected queued refactoring line in Copilot prompt")
@@ -687,8 +783,8 @@ local function test_status_dot_reflects_confirmed_tdd_results()
   assert(#state.status_calls == 1, "expected one persistent status window")
   local status = state.status_calls[1]
   assert(not status.enter and not status.opts.focusable, "expected status window not to take focus")
-  assert(status.opts.width == 1 and status.opts.height == 1 and status.opts.relative == "editor",
-    "expected compact floating status window")
+  assert(status.opts.width == 4 and status.opts.height == 1 and status.opts.relative == "editor",
+    "expected compact floating status window with mode text")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected red status dot highlight")
 
   local stale_red_pulse = state.deferred_activity[#state.deferred_activity]
@@ -1210,12 +1306,12 @@ local function test_different_file_gets_different_session_id()
     return state.open_bufs[buf] or ""
   end
 
-  -- stop the pending job from the first run so a fresh run_tdd is allowed
+  -- Stop pending job, then save second file while TDD mode remains enabled.
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
 
   neotest_mode = "fail-results"
-  bot.run_tdd()
+  save_handler()({ buf = current_buf, file = "/tmp/other_test.dart" })
 
   local uuid2 = arg_after(state.job_calls[2].cmd, "--session-id")
   assert(uuid2 ~= uuid1, "expected different uuid for different file path")
@@ -1288,8 +1384,8 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
 
   assert(#state.job_calls == 1, "expected first refactoring to start a job")
   local status = state.status_calls[1]
-  assert(state.lines_by_buf[status.buf][1] == "● 2", "expected blue status to show all pending refactorings")
-  assert(status.opts.width == 3, "expected status window sized for pending refactoring count")
+  assert(state.lines_by_buf[status.buf][1] == "● Off 2", "expected blue status to show all pending refactorings")
+  assert(status.opts.width == 7, "expected status window sized for pending refactoring count")
   local prompt = arg_after(state.job_calls[1].cmd, "-p")
   assert(prompt:find("extract this into a helper function", 1, true), "expected first refactoring text in prompt")
   assert(prompt:find("Line: 2", 1, true), "expected line number of first refactoring comment in prompt")
@@ -1310,7 +1406,7 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
   assert(#state.commands == 3 and state.commands[2] == "e!" and state.commands[3] == "w",
     "expected accepted refactoring to reload from disk then save")
   assert(#state.job_calls == 2, "expected second refactoring to start a job after first completes")
-  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to decrease after verified refactoring")
+  assert(state.lines_by_buf[status.buf][1] == "● Off 1", "expected blue status to decrease after verified refactoring")
   local prompt2 = arg_after(state.job_calls[2].cmd, "-p")
   assert(prompt2:find("rename y to total", 1, true), "expected second refactoring text in prompt")
   assert(prompt2:find("Line: 3", 1, true), "expected line number recalculated after accepted refactoring")
@@ -1322,8 +1418,8 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
     "expected every completed refactoring to reload from disk then write through formatter")
   assert(#state.job_calls == 2, "expected no third job after all refactorings applied")
   assert(not bot._is_running(), "expected refactor loop to mark itself not running once complete")
-  assert(state.lines_by_buf[status.buf][1] == "●", "expected completed refactoring queue to hide zero count")
-  assert(status.opts.width == 1, "expected completed refactoring status window to shrink to dot")
+  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected completed refactoring queue to hide zero count")
+  assert(status.opts.width == 5, "expected completed refactoring status window to shrink to mode text")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen", "expected completed refactoring status to be green")
 
   assert(state.valid_windows[status.win], "expected status dot to remain visible after refactor completion")
@@ -1360,7 +1456,7 @@ local function test_refactor_rejection_restores_snapshot_and_advances_once()
     assert(state.file_contents["/tmp/sample_test.dart"][i] == line, "expected rejected candidate removed from disk")
     assert(state.lines_by_buf[current_buf][i] == line, "expected rejected candidate removed from buffer")
   end
-  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● 1", "expected rejected item removed from queue count")
+  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● Off 1", "expected rejected item removed from queue count")
 end
 
 local function test_duplicate_refactoring_requests_advance_after_rejection()
@@ -1416,17 +1512,17 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
 
   local status = state.status_calls[1]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue status dot highlight")
-  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status to show one pending refactoring")
+  assert(state.lines_by_buf[status.buf][1] == "● Off 1", "expected blue status to show one pending refactoring")
   table.remove(state.deferred_activity, 1)()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlueDim", "expected refactor dot to pulse blue")
-  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected blue status count to remain while pulsing")
+  assert(state.lines_by_buf[status.buf][1] == "● Off 1", "expected blue status count to remain while pulsing")
 
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
   popup_mapping(state.popup_calls[1], "a")()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed",
     "expected broken refactoring verification to show red status")
-  assert(state.lines_by_buf[status.buf][1] == "●", "expected failed refactoring status to hide pending count")
+  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected failed refactoring status to hide pending count")
 
   reset_state()
   neotest_mode = "pass"
@@ -1439,7 +1535,7 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
   popup_mapping(state.popup_calls[1], "a")()
   assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusGreen",
     "expected completed refactoring to show green status")
-  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "●",
+  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● Off",
     "expected completed refactoring status to hide pending count")
 end
 
@@ -1453,7 +1549,9 @@ local function test_refactor_no_comments_found()
   bot.run_refactor()
 
   assert(#state.job_calls == 0, "expected no job when no refactoring comments present")
-  assert(#state.status_calls == 0, "expected no status display when no refactoring comments present")
+  assert(#state.status_calls == 1, "expected mode status display when no refactoring comments present")
+  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● Off",
+    "expected no-comment refactoring check to preserve off mode status")
   assert(#state.run_calls == 1, "expected TDR to verify green state before reporting no comments")
   assert(#state.notify_calls == 1, "expected no-comment pre-check notification")
   assert(state.notify_calls[1].msg:find("No refactoring found", 1, true),
@@ -1499,7 +1597,7 @@ local function test_refactor_reverts_when_refactoring_breaks_tests()
 
   assert(#state.job_calls == 1, "expected first refactoring job to start once tests confirmed green")
   local status = state.status_calls[1]
-  assert(state.lines_by_buf[status.buf][1] == "● 2", "expected both refactorings in initial pending count")
+  assert(state.lines_by_buf[status.buf][1] == "● Off 2", "expected both refactorings in initial pending count")
 
   -- Accepted first refactoring breaks tests.
   state.file_contents["/tmp/sample_test.dart"] = {
@@ -1514,7 +1612,7 @@ local function test_refactor_reverts_when_refactoring_breaks_tests()
   assert(#state.job_calls == 1, "expected loop to stop, no second refactoring job started")
   assert(not bot._is_running(), "expected refactor loop to stop running after a revert")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected failed refactoring to show red status")
-  assert(state.lines_by_buf[status.buf][1] == "●", "expected red status to hide remaining pending count")
+  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected red status to hide remaining pending count")
 
   local path = "/tmp/sample_test.dart"
   for i, line in ipairs(pre_lines) do
@@ -1540,11 +1638,11 @@ local function test_clear_session_removes_stored_uuid()
   bot.clear_session()
   assert(bot._get_session_id("/tmp/sample_test.dart") == nil, "expected session id cleared")
 
-  -- next run on same file should generate a brand-new uuid
+  -- Next save on same file should generate a brand-new uuid.
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0) -- let the earlier retry loop settle, avoid job guard
   neotest_mode = "fail-results"
-  bot.run_tdd()
+  save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
   local uuid_after = bot._get_session_id("/tmp/sample_test.dart")
   assert(uuid_after ~= nil and uuid_after ~= uuid_before, "expected fresh uuid after clear + rerun")
 end
@@ -1580,6 +1678,8 @@ local function test_readme_guides_user_from_purpose_to_installation_and_keymaps(
   assert(readme:find("<leader>tdr", 1, true), "expected refactor keymap")
   assert(readme:find("<leader>tdm", 1, true), "expected model selector keymap")
   assert(readme:find("floating dot", 1, true), "expected TDD status indicator documentation")
+  assert(readme:find("mode defaults to Off", 1, true), "expected TDD mode default documentation")
+  assert(readme:find("every file save", 1, true), "expected save-triggered TDD documentation")
 end
 
 local function test_repository_has_no_superpowers_docs()
@@ -1618,6 +1718,10 @@ local function test_ci_pipeline_tests_and_bumps_version_after_merged_pr()
 end
 
 test_tdd_mapping_exists()
+test_tdd_mode_is_off_by_default()
+test_tdd_mode_toggles_and_runs_on_save()
+test_tdd_mode_uses_saved_buffer_path_and_ignores_active_cycle()
+test_tdd_mode_setup_replaces_save_handler()
 test_tdd_saves_buffer_before_running_tests()
 test_model_mapping_prompts_for_typed_model_and_remembers_it()
 test_selected_model_applies_to_jobs_and_prompts_on_unavailable_model()
@@ -1691,6 +1795,8 @@ vim.api.nvim_win_is_valid = real.nvim_win_is_valid
 vim.api.nvim_win_set_config = real.nvim_win_set_config
 vim.api.nvim_win_close = real.nvim_win_close
 vim.api.nvim_create_autocmd = real.nvim_create_autocmd
+vim.api.nvim_create_augroup = real.nvim_create_augroup
+vim.api.nvim_del_augroup_by_id = real.nvim_del_augroup_by_id
 vim.api.nvim_set_hl = real.nvim_set_hl
 vim.api.nvim_buf_clear_namespace = real.nvim_buf_clear_namespace
 vim.api.nvim_buf_add_highlight = real.nvim_buf_add_highlight
