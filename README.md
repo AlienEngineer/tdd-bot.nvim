@@ -25,7 +25,7 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
   background Copilot review; Copilot is instructed to remove each applied comment
 - `<leader>tdm` prompts for a Copilot model ID; `auto` is suggested
 - refactoring only starts in a green state: tests run first, and the loop aborts if anything is already failing
-- each refactoring may change related implementation and test files; review shows one combined workspace diff. Press `a` to accept or `r`, `q`, or `<Esc>` to reject
+- each refactoring may change related implementation and test files only when they share initiating file's extension; generated `build/` output and other file types are restored if Copilot changes them. Review shows one combined workspace diff. Press `a` to accept or `r`, `q`, or `<Esc>` to reject
 - rejected changes restore every candidate file to pre-refactoring content; queue advances only after accept or reject
 - failed accepted refactorings start bounded Copilot repair iterations. Exhaustion restores candidate workspace and stops loop
 - a compact, non-focusable floating dot pulses green while TDD tests run, red

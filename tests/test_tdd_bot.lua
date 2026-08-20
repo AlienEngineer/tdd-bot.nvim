@@ -1652,6 +1652,90 @@ local function test_refactor_repairs_related_source_and_tests()
   assert(state.buf_lines[2][1] == "assert(extracted() == 1)", "expected loaded related test buffer synced")
 end
 
+local function test_refactor_only_reviews_matching_extension_and_restores_generated_output()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local original = { "// Refactoring: rename helper" }
+  state.buf_lines[current_buf] = original
+  state.file_contents["/tmp/sample_test.dart"] = original
+  state.file_contents["/tmp/related_test.dart"] = { "old test" }
+  state.file_contents["/tmp/notes.md"] = { "old notes" }
+  state.file_contents["/tmp/lib/build/generated.dart"] = { "old generated output" }
+  state.open_bufs[2] = "/tmp/lib/build/generated.dart"
+  state.buf_lines[2] = { "old generated output" }
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  local prompt = arg_after(state.job_calls[1].cmd, "-p")
+  assert(prompt:find("only files with .dart extension", 1, true),
+    "expected refactor prompt to limit edits to initiating extension")
+  assert(prompt:find("Do not edit generated build output", 1, true),
+    "expected refactor prompt to exclude generated build output")
+
+  state.file_contents["/tmp/sample_test.dart"] = { "renamed helper" }
+  state.file_contents["/tmp/related_test.dart"] = { "new test" }
+  state.file_contents["/tmp/notes.md"] = { "changed notes" }
+  state.file_contents["/tmp/new_notes.md"] = { "new notes" }
+  state.file_contents["/tmp/lib/build/generated.dart"] = { "changed generated output" }
+  state.file_contents["/tmp/lib/build/new_generated.dart"] = { "new generated output" }
+  state.job_calls[1].opts.on_exit(1, 0)
+
+  local review = table.concat(state.popup_buffers[state.popup_calls[1].buf], "\n")
+  assert(review:find("/tmp/sample_test.dart", 1, true) and review:find("/tmp/related_test.dart", 1, true),
+    "expected review to include matching-extension source and test changes")
+  assert(not review:find("notes.md", 1, true) and not review:find("/build/", 1, true),
+    "expected review to exclude other extensions and generated output")
+  assert(state.file_contents["/tmp/notes.md"][1] == "old notes",
+    "expected other-extension file restored before review")
+  assert(state.file_contents["/tmp/new_notes.md"] == nil,
+    "expected new other-extension file deleted before review")
+  assert(state.file_contents["/tmp/lib/build/generated.dart"][1] == "old generated output",
+    "expected generated output restored before review")
+  assert(state.file_contents["/tmp/lib/build/new_generated.dart"] == nil,
+    "expected new generated output deleted before review")
+  assert(state.buf_lines[2][1] == "old generated output",
+    "expected loaded generated buffer to retain pre-refactoring content")
+
+  popup_mapping(state.popup_calls[1], "r")()
+  assert(state.file_contents["/tmp/sample_test.dart"][1] == original[1],
+    "expected rejected matching-extension source restored")
+  assert(state.file_contents["/tmp/related_test.dart"][1] == "old test",
+    "expected rejected matching-extension test restored")
+end
+
+local function test_extensionless_refactor_excludes_files_with_extensions()
+  reset_state()
+  neotest_mode = "pass"
+  install_neotest()
+  local original_get_name = vim.api.nvim_buf_get_name
+  vim.api.nvim_buf_get_name = function(buf)
+    if buf == 0 or buf == current_buf then
+      return "/tmp/Makefile"
+    end
+    return state.open_bufs[buf] or ""
+  end
+  local original = { "// Refactoring: rename target" }
+  state.buf_lines[current_buf] = original
+  state.file_contents["/tmp/Makefile"] = original
+  local bot = load_bot()
+  bot.setup()
+  bot.run_refactor()
+
+  state.file_contents["/tmp/Makefile"] = { "all: renamed-target" }
+  state.file_contents["/tmp/unrelated.dart"] = { "changed dart file" }
+  state.job_calls[1].opts.on_exit(1, 0)
+
+  local review = table.concat(state.popup_buffers[state.popup_calls[1].buf], "\n")
+  assert(review:find("/tmp/Makefile", 1, true) and not review:find("unrelated.dart", 1, true),
+    "expected extensionless refactor review to exclude files with extensions")
+  assert(state.file_contents["/tmp/unrelated.dart"] == nil,
+    "expected extensionless refactor to delete new file with an extension")
+  popup_mapping(state.popup_calls[1], "r")()
+  vim.api.nvim_buf_get_name = original_get_name
+end
+
 local function test_refactor_rejection_restores_all_workspace_changes()
   reset_state()
   neotest_mode = "pass"
@@ -1660,6 +1744,8 @@ local function test_refactor_rejection_restores_all_workspace_changes()
   state.buf_lines[current_buf] = original
   state.file_contents["/tmp/sample_test.dart"] = original
   state.file_contents["/tmp/related_test.dart"] = { "old test" }
+  state.file_contents["/tmp/build/generated.dart"] = { "old generated output" }
+  state.file_contents["/tmp/notes.md"] = { "old notes" }
   local bot = load_bot()
   bot.setup()
   bot.run_refactor()
@@ -1684,6 +1770,8 @@ local function test_refactor_repair_limit_restores_workspace()
   state.buf_lines[current_buf] = original
   state.file_contents["/tmp/sample_test.dart"] = original
   state.file_contents["/tmp/related_test.dart"] = { "old test" }
+  state.file_contents["/tmp/build/generated.dart"] = { "old generated output" }
+  state.file_contents["/tmp/notes.md"] = { "old notes" }
   local bot = load_bot()
   bot.setup({ max_refactor_retries = 1 })
   bot.run_refactor()
@@ -1691,19 +1779,32 @@ local function test_refactor_repair_limit_restores_workspace()
   state.file_contents["/tmp/sample_test.dart"] = { "broken source" }
   state.file_contents["/tmp/related_test.dart"] = { "broken test" }
   state.file_contents["/tmp/new_helper.dart"] = { "new file" }
+  state.file_contents["/tmp/build/generated.dart"] = { "broken generated output" }
+  state.file_contents["/tmp/notes.md"] = { "broken notes" }
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
+  assert(state.file_contents["/tmp/build/generated.dart"][1] == "old generated output",
+    "expected generated output restored before failed candidate review")
+  assert(state.file_contents["/tmp/notes.md"][1] == "old notes",
+    "expected other-extension file restored before failed candidate review")
   popup_mapping(state.popup_calls[1], "a")()
   assert(#state.job_calls == 2, "expected one repair attempt")
 
   state.file_contents["/tmp/related_test.dart"] = { "still broken test" }
+  state.file_contents["/tmp/build/generated.dart"] = { "still broken generated output" }
   state.job_calls[2].opts.on_exit(2, 0)
+  assert(state.file_contents["/tmp/build/generated.dart"][1] == "old generated output",
+    "expected generated output restored before repair candidate review")
   popup_mapping(state.popup_calls[2], "a")()
 
   assert(#state.job_calls == 2 and not bot._is_running(), "expected retry limit to stop refactoring")
   assert(state.file_contents["/tmp/sample_test.dart"][1] == original[1], "expected source restored after exhausted repairs")
   assert(state.file_contents["/tmp/related_test.dart"][1] == "old test", "expected test restored after exhausted repairs")
   assert(state.file_contents["/tmp/new_helper.dart"] == nil, "expected new file removed after exhausted repairs")
+  assert(state.file_contents["/tmp/build/generated.dart"][1] == "old generated output",
+    "expected generated output unchanged after exhausted repairs")
+  assert(state.file_contents["/tmp/notes.md"][1] == "old notes",
+    "expected other-extension file unchanged after exhausted repairs")
   assert(#state.notify_calls == 1 and state.notify_calls[1].msg:find("retries exhausted", 1, true),
     "expected one terminal refactoring failure notification")
 end
@@ -1856,6 +1957,8 @@ test_refactor_status_transitions_from_blue_to_red_or_green()
 test_refactor_no_comments_found()
 test_refactor_aborts_when_tests_red()
 test_refactor_repairs_related_source_and_tests()
+test_refactor_only_reviews_matching_extension_and_restores_generated_output()
+test_extensionless_refactor_excludes_files_with_extensions()
 test_refactor_rejection_restores_all_workspace_changes()
 test_refactor_repair_limit_restores_workspace()
 test_clear_session_removes_stored_uuid()
