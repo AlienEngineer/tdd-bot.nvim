@@ -577,7 +577,7 @@ local function test_tdd_mapping_exists()
   assert(mapped_handler("<leader>tdd"), "expected <leader>tdd mapping")
 end
 
-local function test_tdd_mode_is_off_by_default()
+local function test_tdd_mode_hides_status_by_default()
   reset_state()
   install_neotest()
   local bot = load_bot()
@@ -585,8 +585,7 @@ local function test_tdd_mode_is_off_by_default()
 
   assert(not bot._is_mode_enabled(), "expected TDD mode to default to off")
   assert(#state.autocmds == 1 and save_handler(), "expected one save handler")
-  local status = state.status_calls[1]
-  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected status to show off mode")
+  assert(#state.status_calls == 0, "expected disabled mode to hide the status window")
 end
 
 local function test_tdd_mode_toggles_and_runs_on_save()
@@ -596,13 +595,11 @@ local function test_tdd_mode_toggles_and_runs_on_save()
   local bot = load_bot()
   bot.setup()
 
-  local off_status = state.status_calls[1]
   bot.run_tdd()
-  local status = state.status_calls[2]
+  local status = state.status_calls[1]
   assert(bot._is_mode_enabled(), "expected first TDD command to enable mode")
-  assert(not state.valid_windows[off_status.win], "expected off status dot to close when enabling mode")
-  assert(#state.status_calls == 2, "expected enabled mode to create a replacement status dot")
-  assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected enabled status with suite total")
+  assert(#state.status_calls == 1, "expected enabled mode to create one status dot")
+  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected enabled status with suite total")
   assert(#state.run_calls == 1, "expected enabling mode to run tests immediately")
 
   save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
@@ -610,7 +607,7 @@ local function test_tdd_mode_toggles_and_runs_on_save()
 
   bot.run_tdd()
   assert(not bot._is_mode_enabled(), "expected second TDD command to disable mode")
-  assert(state.lines_by_buf[status.buf][1] == "● Off 1", "expected disabled status to retain suite total")
+  assert(not state.valid_windows[status.win], "expected disabled mode to close the status window")
   save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
   assert(#state.run_calls == 2, "expected disabled mode to ignore saves")
 end
@@ -642,11 +639,11 @@ local function test_saved_buffer_updates_status_buffer_total()
   bot.setup()
   bot.run_tdd()
 
-  local status = state.status_calls[2]
-  assert(state.lines_by_buf[status.buf][1] == "● On 2",
+  local status = state.status_calls[1]
+  assert(state.lines_by_buf[status.buf][1] == "● 2",
     "expected initial status count from the current buffer")
   save_handler()({ buf = 2, file = "/tmp/other_test.dart" })
-  assert(state.lines_by_buf[status.buf][1] == "● On 3",
+  assert(state.lines_by_buf[status.buf][1] == "● 3",
     "expected saved buffer status count after restarting the solution suite")
   assert(state.lines_by_buf[status.buf][2] == "5 ✓",
     "expected saved-buffer run to retain the whole-solution result")
@@ -661,12 +658,12 @@ local function test_restarted_suite_clears_previous_status_total()
   bot.setup()
   bot.run_tdd()
 
-  local status = state.status_calls[2]
+  local status = state.status_calls[1]
   table.remove(state.deferred_polls, 1)()
-  assert(state.lines_by_buf[status.buf][1] == "● On 5", "expected discovered suite total before restart")
+  assert(state.lines_by_buf[status.buf][1] == "● 5", "expected discovered suite total before restart")
 
   save_handler()({ buf = current_buf, file = "/tmp/sample_test.dart" })
-  assert(state.lines_by_buf[status.buf][1] == "● On", "expected replacement suite to clear stale total")
+  assert(state.lines_by_buf[status.buf][1] == "●", "expected replacement suite to clear stale total")
 end
 
 local function test_tdd_mode_setup_replaces_save_handler()
@@ -837,8 +834,8 @@ local function test_failed_copilot_launch_stops_on_static_red_dot()
   bot.run_tdd()
 
   assert(not bot._is_running(), "expected failed Copilot launch to stop TDD loop")
-  assert(#state.closed_windows == 1, "expected only the off status dot to close when enabling mode")
-  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusRed",
+  assert(#state.closed_windows == 0, "expected no hidden status window to close when enabling mode")
+  assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusRed",
     "expected failed Copilot launch to leave a static red dot")
   assert(#state.notify_calls == 0, "expected failed Copilot launch to avoid notification")
 end
@@ -851,11 +848,10 @@ local function test_running_loop_pulses_single_status_dot()
   bot.setup()
   bot.run_tdd()
 
-  assert(#state.status_calls == 2, "expected off status dot to be replaced when enabling mode")
-  local status = state.status_calls[2]
+  assert(#state.status_calls == 1, "expected enabled mode to create one status dot")
+  local status = state.status_calls[1]
   assert(not status.enter and not status.opts.focusable, "expected non-focusable status dot")
-  assert(not state.valid_windows[state.status_calls[1].win], "expected off status dot to close")
-  assert(#state.window_calls == 2 and not status.opts.border, "expected no bordered activity window")
+  assert(#state.window_calls == 1 and not status.opts.border, "expected no bordered activity window")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusRed", "expected bright red recovery dot")
   assert(state.highlights.TddBotStatusRedDim.fg == "#802222", "expected dim red pulse highlight")
   assert(state.highlights.TddBotStatusGreenDim.fg == "#287a40", "expected dim green pulse highlight")
@@ -882,8 +878,8 @@ local function test_passing_run_completes_loop()
   assert(#state.run_calls == 1, "expected one test run")
   assert(#state.job_calls == 0, "expected no refactoring job without refactoring comments")
   assert(not bot._is_running(), "expected passing test run to complete TDD loop")
-  assert(#state.closed_windows == 1, "expected only the off status dot to close when enabling mode")
-  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusGreen",
+  assert(#state.closed_windows == 0, "expected no hidden status window to close when enabling mode")
+  assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusGreen",
     "expected passing run to settle on a static green dot")
   assert(#state.notify_calls == 0, "expected passing run to avoid notifications")
 end
@@ -907,9 +903,9 @@ local function test_tdd_starts_refactoring_queue_after_passing_tests()
   assert(#state.run_calls == 1, "expected TDD to run tests once before refactoring")
   assert(#state.job_calls == 1, "expected passing TDD to start queued refactoring")
   assert(bot._is_running(), "expected TDD loop to remain active for refactoring review")
-  local status = state.status_calls[2]
+  local status = state.status_calls[1]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue refactoring status")
-  assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected pending refactoring count")
+  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected pending refactoring count")
   local prompt = arg_after(state.job_calls[1].cmd, "-p")
   assert(prompt:find("extract value helper", 1, true), "expected queued refactoring in Copilot prompt")
   assert(prompt:find("Line: 2", 1, true), "expected queued refactoring line in Copilot prompt")
@@ -942,7 +938,7 @@ local function test_tdd_starts_refactoring_queue_after_fix_recovery()
   assert(#state.run_calls == 2, "expected one TDD rerun after fixing failure")
   assert(#state.job_calls == 2, "expected passing recovery to start queued refactoring")
   assert(bot._is_running(), "expected recovered TDD loop to remain active for review")
-  local status = state.status_calls[2]
+  local status = state.status_calls[1]
   assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue refactoring status after recovery")
   local prompt = arg_after(state.job_calls[2].cmd, "-p")
   assert(prompt:find("extract value helper", 1, true), "expected synced refactoring comment in queued prompt")
@@ -956,8 +952,8 @@ local function test_status_dot_reflects_confirmed_tdd_results()
   bot.setup()
   bot.run_tdd()
 
-  assert(#state.status_calls == 2, "expected one replacement status window after enabling mode")
-  local status = state.status_calls[2]
+  assert(#state.status_calls == 1, "expected one status window after enabling mode")
+  local status = state.status_calls[1]
   assert(not status.enter and not status.opts.focusable, "expected status window not to take focus")
   assert(status.opts.width >= 4 and status.opts.height == 2 and status.opts.relative == "editor",
     "expected floating status window with suite result below mode text")
@@ -966,7 +962,7 @@ local function test_status_dot_reflects_confirmed_tdd_results()
   local stale_red_pulse = state.deferred_activity[#state.deferred_activity]
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
-  assert(#state.status_calls == 2, "expected green update to reuse replacement status window")
+  assert(#state.status_calls == 1, "expected green update to reuse the status window")
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen", "expected green status dot highlight")
   stale_red_pulse()
   assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen",
@@ -982,18 +978,18 @@ local function test_suite_status_shows_live_progress_and_success()
   bot.setup()
   bot.run_tdd()
 
-  local status = state.status_calls[2]
-  assert(state.lines_by_buf[status.buf][1] == "● On", "expected unknown suite status before discovery")
+  local status = state.status_calls[1]
+  assert(state.lines_by_buf[status.buf][1] == "●", "expected unknown suite status before discovery")
   assert(state.lines_by_buf[status.buf][2] == "--/--", "expected unknown suite count before discovery")
   assert(status.opts.height == 2, "expected suite status below mode text")
 
   table.remove(state.deferred_polls, 1)()
-  assert(state.lines_by_buf[status.buf][1] == "● On 5", "expected suite total beside enabled status")
+  assert(state.lines_by_buf[status.buf][1] == "● 5", "expected suite total beside enabled status")
   assert(state.lines_by_buf[status.buf][2] == "2/5...",
     "expected completed suite tests to update live, got " .. tostring(state.lines_by_buf[status.buf][2]))
 
   table.remove(state.deferred_polls, 1)()
-  assert(state.lines_by_buf[status.buf][1] == "● On 5", "expected completed suite total beside enabled status")
+  assert(state.lines_by_buf[status.buf][1] == "● 5", "expected completed suite total beside enabled status")
   assert(state.lines_by_buf[status.buf][2] == "5 ✓", "expected completed suite to show success check")
 end
 
@@ -1005,8 +1001,8 @@ local function test_suite_status_shows_failure_count()
   bot.setup()
   bot.run_tdd()
 
-  local status = state.status_calls[2]
-  assert(state.lines_by_buf[status.buf][1] == "● On 1", "expected failed suite total beside enabled status")
+  local status = state.status_calls[1]
+  assert(state.lines_by_buf[status.buf][1] == "● 1", "expected failed suite total beside enabled status")
   assert(state.lines_by_buf[status.buf][2] == "1/1 ✗", "expected failing suite count and failure symbol")
 end
 
@@ -1019,15 +1015,15 @@ local function test_suite_status_separates_current_buffer_and_solution_counts()
   bot.setup()
   bot.run_tdd()
 
-  local status = state.status_calls[2]
+  local status = state.status_calls[1]
   table.remove(state.deferred_polls, 1)()
-  assert(state.lines_by_buf[status.buf][1] == "● On 2",
+  assert(state.lines_by_buf[status.buf][1] == "● 2",
     "expected status total to include only tests in the current buffer")
   assert(state.lines_by_buf[status.buf][2] == "1/5...",
     "expected progress to include every test in the solution")
 
   table.remove(state.deferred_polls, 1)()
-  assert(state.lines_by_buf[status.buf][1] == "● On 2",
+  assert(state.lines_by_buf[status.buf][1] == "● 2",
     "expected completed status total to include only tests in the current buffer")
   assert(state.lines_by_buf[status.buf][2] == "5 ✓",
     "expected completed count to include every test in the solution")
@@ -1041,8 +1037,8 @@ local function test_suite_failure_keeps_buffer_total_above_solution_failure()
   bot.setup()
   bot.run_tdd()
 
-  local status = state.status_calls[2]
-  assert(state.lines_by_buf[status.buf][1] == "● On 2",
+  local status = state.status_calls[1]
+  assert(state.lines_by_buf[status.buf][1] == "● 2",
     "expected current buffer total beside the status dot after a suite failure")
   assert(state.lines_by_buf[status.buf][2] == "3/5 ✗",
     "expected failure count to include every test in the solution")
@@ -1056,13 +1052,13 @@ local function test_status_dot_recovers_after_manual_close()
   bot.setup()
   bot.run_tdd()
 
-  local first = state.status_calls[2]
+  local first = state.status_calls[1]
   state.valid_windows[first.win] = false
   neotest_mode = "pass"
   state.job_calls[1].opts.on_exit(1, 0)
 
-  assert(#state.status_calls == 3, "expected closed status window to be recreated")
-  assert(state.buffer_highlights[state.status_calls[3].buf] == "TddBotStatusGreen",
+  assert(#state.status_calls == 2, "expected closed status window to be recreated")
+  assert(state.buffer_highlights[state.status_calls[2].buf] == "TddBotStatusGreen",
     "expected recreated status window to show current green state")
 end
 
@@ -1099,7 +1095,7 @@ local function test_tdd_waits_for_fresh_complete_suite_total()
   bot.setup()
   bot.run_tdd()
 
-  local status = state.status_calls[2]
+  local status = state.status_calls[1]
   table.remove(state.deferred_polls, 1)()
   assert(bot._is_running(), "expected cached idle suite state not to finish the requested run")
   assert(state.lines_by_buf[status.buf][2] == "159/159...",
@@ -1669,9 +1665,7 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
   bot.run_refactor()
 
   assert(#state.job_calls == 1, "expected first refactoring to start a job")
-  local status = state.status_calls[1]
-  assert(state.lines_by_buf[status.buf][1] == "● Off 2", "expected blue status to show all pending refactorings")
-  assert(status.opts.width == 7, "expected status window sized for pending refactoring count")
+  assert(#state.status_calls == 0, "expected disabled TDD mode to hide refactoring status")
   local prompt = arg_after(state.job_calls[1].cmd, "-p")
   assert(prompt:find("extract this into a helper function", 1, true), "expected first refactoring text in prompt")
   assert(prompt:find("Line: 2", 1, true), "expected line number of first refactoring comment in prompt")
@@ -1698,7 +1692,6 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
   assert(#state.commands == 3 and state.commands[2] == "e!" and state.commands[3] == "w",
     "expected accepted refactoring to reload from disk then save")
   assert(#state.job_calls == 2, "expected second refactoring to start a job after first completes")
-  assert(state.lines_by_buf[status.buf][1] == "● Off 1", "expected blue status to decrease after verified refactoring")
   local prompt2 = arg_after(state.job_calls[2].cmd, "-p")
   assert(prompt2:find("rename y to total", 1, true), "expected second refactoring text in prompt")
   assert(prompt2:find("Line: 3", 1, true), "expected line number recalculated after accepted refactoring")
@@ -1710,11 +1703,7 @@ local function test_refactor_queue_waits_for_acceptance_before_next_job()
     "expected every completed refactoring to reload from disk then write through formatter")
   assert(#state.job_calls == 2, "expected no third job after all refactorings applied")
   assert(not bot._is_running(), "expected refactor loop to mark itself not running once complete")
-  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected completed refactoring queue to hide zero count")
-  assert(status.opts.width == 5, "expected completed refactoring status window to shrink to mode text")
-  assert(state.buffer_highlights[status.buf] == "TddBotStatusGreen", "expected completed refactoring status to be green")
-
-  assert(state.valid_windows[status.win], "expected status dot to remain visible after refactor completion")
+  assert(#state.status_calls == 0, "expected disabled TDD mode to keep refactoring status hidden")
   assert(#state.notify_calls == 0, "expected refactor completion to avoid notifications")
 end
 
@@ -1748,7 +1737,7 @@ local function test_refactor_rejection_restores_snapshot_and_advances_once()
     assert(state.file_contents["/tmp/sample_test.dart"][i] == line, "expected rejected candidate removed from disk")
     assert(state.lines_by_buf[current_buf][i] == line, "expected rejected candidate removed from buffer")
   end
-  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● Off 1", "expected rejected item removed from queue count")
+  assert(#state.status_calls == 0, "expected disabled TDD mode to keep rejection status hidden")
 end
 
 local function test_duplicate_refactoring_directives_survive_accepted_candidate()
@@ -1818,7 +1807,7 @@ local function test_closing_refactoring_review_rejects_candidate()
   assert(not bot._is_running(), "expected closed final review to complete queue")
 end
 
-local function test_refactor_status_transitions_from_blue_to_red_or_green()
+local function test_refactor_status_stays_hidden_when_tdd_mode_is_off()
   reset_state()
   neotest_mode = "pass"
   install_neotest()
@@ -1827,19 +1816,12 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
   bot.setup()
   bot.run_refactor()
 
-  local status = state.status_calls[1]
-  assert(state.buffer_highlights[status.buf] == "TddBotStatusBlue", "expected blue status dot highlight")
-  assert(state.lines_by_buf[status.buf][1] == "● Off 1", "expected blue status to show one pending refactoring")
-  table.remove(state.deferred_activity, 1)()
-  assert(state.buffer_highlights[status.buf] == "TddBotStatusBlueDim", "expected refactor dot to pulse blue")
-  assert(state.lines_by_buf[status.buf][1] == "● Off 1", "expected blue status count to remain while pulsing")
+  assert(#state.status_calls == 0, "expected refactoring status to remain hidden while TDD mode is off")
 
   neotest_mode = "fail-results"
   state.job_calls[1].opts.on_exit(1, 0)
   popup_mapping(state.popup_calls[1], "a")()
-  assert(state.buffer_highlights[status.buf] == "TddBotStatusRed",
-    "expected broken refactoring verification to show red status")
-  assert(state.lines_by_buf[status.buf][1] == "● Off", "expected failed refactoring status to hide pending count")
+  assert(#state.status_calls == 0, "expected failed refactoring status to remain hidden")
 
   reset_state()
   neotest_mode = "pass"
@@ -1850,10 +1832,7 @@ local function test_refactor_status_transitions_from_blue_to_red_or_green()
   bot.run_refactor()
   state.job_calls[1].opts.on_exit(1, 0)
   popup_mapping(state.popup_calls[1], "a")()
-  assert(state.buffer_highlights[state.status_calls[1].buf] == "TddBotStatusGreen",
-    "expected completed refactoring to show green status")
-  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● Off",
-    "expected completed refactoring status to hide pending count")
+  assert(#state.status_calls == 0, "expected completed refactoring status to remain hidden")
 end
 
 local function test_refactor_no_comments_found()
@@ -1866,9 +1845,7 @@ local function test_refactor_no_comments_found()
   bot.run_refactor()
 
   assert(#state.job_calls == 0, "expected no job when no refactoring comments present")
-  assert(#state.status_calls == 1, "expected mode status display when no refactoring comments present")
-  assert(state.lines_by_buf[state.status_calls[1].buf][1] == "● Off",
-    "expected no-comment refactoring check to preserve off mode status")
+  assert(#state.status_calls == 0, "expected disabled TDD mode to hide status without refactorings")
   assert(#state.run_calls == 1, "expected TDR to verify green state before reporting no comments")
   assert(#state.notify_calls == 1, "expected no-comment pre-check notification")
   assert(state.notify_calls[1].msg:find("No refactoring found", 1, true),
@@ -2226,7 +2203,7 @@ local function test_ci_pipeline_tests_and_bumps_version_after_merged_pr()
 end
 
 test_tdd_mapping_exists()
-test_tdd_mode_is_off_by_default()
+test_tdd_mode_hides_status_by_default()
 test_tdd_mode_toggles_and_runs_on_save()
 test_tdd_mode_restarts_suite_for_saved_buffer()
 test_saved_buffer_updates_status_buffer_total()
@@ -2285,7 +2262,7 @@ test_refactor_rejection_restores_snapshot_and_advances_once()
 test_duplicate_refactoring_directives_survive_accepted_candidate()
 test_duplicate_refactoring_requests_advance_after_rejection()
 test_closing_refactoring_review_rejects_candidate()
-test_refactor_status_transitions_from_blue_to_red_or_green()
+test_refactor_status_stays_hidden_when_tdd_mode_is_off()
 test_refactor_no_comments_found()
 test_refactor_aborts_when_tests_red()
 test_refactor_repairs_related_source_and_tests()
