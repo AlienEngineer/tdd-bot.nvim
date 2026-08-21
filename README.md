@@ -1,12 +1,9 @@
 # tdd-bot.nvim
 
-`tdd-bot.nvim` keeps a test-driven development loop inside Neovim. It runs the
-whole project's test suite through [neotest](https://github.com/nvim-neotest/neotest);
-when they fail, it asks the Copilot CLI to fix them in a background job and
-reruns the tests when Copilot exits.
-It also supports Copilot-assisted refactoring that starts only when tests pass.
+`tdd-bot.nvim` runs your Neovim tests with `neotest`. When a test fails, it
+asks the Copilot CLI to fix it, then runs the tests again.
 
-[![CI](https://github.com/AlienEngineer/tdd-bot.nvim/actions/workflows/ci.yml/badge.svg)](https://github.com/AlienEngineer/tdd-bot.nvim/actions/workflows/ci.yml)
+## Install
 
 ## Features
 
@@ -42,21 +39,22 @@ It also supports Copilot-assisted refactoring that starts only when tests pass.
 
 Create `~/.config/nvim/lua/plugins/tdd-bot.lua`:
 
+You need `nvim-neotest/neotest` and an installed, authenticated `copilot` CLI.
+With [lazy.nvim](https://github.com/folke/lazy.nvim):
+
 ```lua
-return {
-  {
-    "AlienEngineer/tdd-bot.nvim",
-    dependencies = { "nvim-neotest/neotest" },
-    opts = {},
-  },
+{
+  "AlienEngineer/tdd-bot.nvim",
+  dependencies = { "nvim-neotest/neotest" },
+  opts = {},
 }
 ```
 
-Restart Neovim, then let LazyVim install the plugin. `tdd-bot.nvim` requires the
-`copilot` CLI to be installed and authenticated. Every Copilot job starts in
-detected project root and limits file tools to that root (not system temp).
-Only local read, edit, search, and shell tools needed for project work are
-available. URL/web tools and MCP servers are unavailable.
+## Start and stop
+
+Open a file and press `<leader>tdd` in normal mode to start TDD mode. It runs
+the test suite immediately and again whenever you save a file. Press
+`<leader>tdd` again to stop TDD mode and cancel active work.
 
 ```sh
 copilot --available-tools=view,glob,rg,apply_patch,bash --disallow-temp-dir --deny-tool=url

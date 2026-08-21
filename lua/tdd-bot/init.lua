@@ -149,11 +149,16 @@ local function clear_status()
 end
 
 local function render_status(state_name, bright, detail)
+  if not tdd_mode_enabled then
+    clear_status()
+    return
+  end
+
   local highlights = status_highlights[state_name]
   if not highlights then
     return
   end
-  local lines = { "● " .. (tdd_mode_enabled and "On" or "Off") }
+  local lines = { "●" }
   if state_name == "blue" and type(detail) == "number" and detail > 0 then
     lines[1] = string.format("%s %d", lines[1], detail)
   elseif buffer_total then
@@ -1378,7 +1383,7 @@ function M.run_tdd()
   if tdd_mode_enabled then
     tdd_mode_enabled = false
     cancel_tdd_run()
-    set_status("green")
+    clear_status()
     return
   end
 
