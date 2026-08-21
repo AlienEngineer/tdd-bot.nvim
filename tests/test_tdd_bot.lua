@@ -2142,29 +2142,28 @@ local function test_clear_session_avoids_notification_when_nothing_to_clear()
   assert(#state.notify_calls == 0, "expected session clearing to avoid notifications")
 end
 
-local function test_readme_guides_user_from_purpose_to_installation_and_keymaps()
+local function test_readme_guides_user_from_purpose_to_installation_and_tdd_toggle()
   local file = assert(io.open("README.md", "r"))
   local readme = file:read("*a")
   file:close()
 
-  local description = assert(readme:find("keeps a test%-driven development loop", 1, false),
+  local description = assert(readme:find("runs your Neovim tests with `neotest`", 1, true),
     "expected README to describe plugin purpose")
-  local installation = assert(readme:find("## Install with LazyVim", 1, true),
-    "expected LazyVim installation section")
-  local usage = assert(readme:find("## Use tdd%-bot", 1, false),
-    "expected usage section")
+  local installation = assert(readme:find("## Install", 1, true),
+    "expected installation section")
+  local usage = assert(readme:find("## Start and stop", 1, true),
+    "expected start and stop section")
 
-  assert(description < installation and installation < usage,
-    "expected README order: description, LazyVim installation, usage")
+  assert(description < installation and installation < usage, "expected README order: summary, installation, usage")
   assert(readme:find('"AlienEngineer/tdd%-bot%.nvim"', 1, false),
-    "expected LazyVim plugin specification")
-  assert(readme:find("<leader>tdd", 1, true), "expected run-tests keymap")
-  assert(readme:find("<leader>tdc", 1, true), "expected clear-session keymap")
-  assert(readme:find("<leader>tdr", 1, true), "expected refactor keymap")
-  assert(readme:find("<leader>tdm", 1, true), "expected model selector keymap")
-  assert(readme:find("live whole-solution progress", 1, true), "expected solution status indicator documentation")
-  assert(readme:find("mode defaults to Off", 1, true), "expected TDD mode default documentation")
-  assert(readme:find("every file save", 1, true), "expected save-triggered TDD documentation")
+    "expected lazy.nvim plugin specification")
+  assert(readme:find('dependencies = { "nvim%-neotest/neotest" }', 1, false),
+    "expected neotest dependency")
+  assert(readme:find("installed, authenticated `copilot` CLI", 1, true),
+    "expected Copilot CLI prerequisite")
+  assert(readme:find("<leader>tdd", 1, true), "expected TDD toggle keymap")
+  assert(readme:find("stop TDD mode and cancel active work", 1, true),
+    "expected instructions to stop TDD mode")
 end
 
 local function test_repository_has_no_superpowers_docs()
@@ -2273,7 +2272,7 @@ test_refactor_rejection_restores_all_workspace_changes()
 test_refactor_repair_limit_restores_workspace()
 test_clear_session_removes_stored_uuid()
 test_clear_session_avoids_notification_when_nothing_to_clear()
-test_readme_guides_user_from_purpose_to_installation_and_keymaps()
+test_readme_guides_user_from_purpose_to_installation_and_tdd_toggle()
 test_repository_has_no_superpowers_docs()
 test_ci_pipeline_tests_and_bumps_version_after_merged_pr()
 
