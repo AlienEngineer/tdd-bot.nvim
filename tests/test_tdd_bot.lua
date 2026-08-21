@@ -18,6 +18,9 @@ local state = {
   highlights = {},
   buffer_highlights = {},
   buffer_options = {},
+  option_writes = {},
+  modifiable_by_buf = {},
+  line_write_modifiable = {},
   valid_buffers = {},
   valid_windows = {},
   next_buffer = 1000,
@@ -61,6 +64,8 @@ local real = {
   nvim_set_hl = vim.api.nvim_set_hl,
   nvim_buf_clear_namespace = vim.api.nvim_buf_clear_namespace,
   nvim_buf_add_highlight = vim.api.nvim_buf_add_highlight,
+  nvim_buf_call = vim.api.nvim_buf_call,
+  nvim_get_option_value = vim.api.nvim_get_option_value,
   nvim_set_option_value = vim.api.nvim_set_option_value,
   readfile = vim.fn.readfile,
   writefile = vim.fn.writefile,
@@ -116,6 +121,7 @@ vim.api.nvim_get_current_buf = function()
 end
 
 vim.api.nvim_buf_set_lines = function(buf, _, _, _, lines)
+  state.line_write_modifiable[buf] = state.modifiable_by_buf[buf] ~= false
   state.lines_by_buf[buf] = {}
   state.buf_lines[buf] = {}
   for _, line in ipairs(lines) do
@@ -220,9 +226,24 @@ vim.api.nvim_buf_add_highlight = function(buf, _, highlight)
   state.buffer_highlights[buf] = highlight
 end
 
+vim.api.nvim_buf_call = function(_, callback)
+  return callback()
+end
+
+vim.api.nvim_get_option_value = function(name, opts)
+  if name == "modifiable" and opts and opts.buf then
+    return state.modifiable_by_buf[opts.buf] ~= false
+  end
+  return real.nvim_get_option_value(name, opts)
+end
+
 vim.api.nvim_set_option_value = function(name, value, opts)
   state.buffer_options[opts.buf] = state.buffer_options[opts.buf] or {}
   state.buffer_options[opts.buf][name] = value
+  if name == "modifiable" then
+    state.modifiable_by_buf[opts.buf] = value
+    table.insert(state.option_writes, { buf = opts.buf, name = name, value = value })
+  end
 end
 
 vim.fn.readfile = function(path)
@@ -340,7 +361,11 @@ local function reset_state()
   state.highlights = {}
   state.buffer_highlights = {}
   state.buffer_options = {}
+  state.option_writes = {}
+  state.modifiable_by_buf = { [1] = true }
+  state.line_write_modifiable = {}
   state.valid_buffers = {}
+  state.valid_buffers[1] = true
   state.valid_windows = {}
   state.next_buffer = 1000
   state.next_window = 2000
@@ -690,6 +715,107 @@ local function test_tdd_saves_buffer_before_running_tests()
 
   assert(state.commands[1] == "write", "expected TDD to save current buffer before tests run")
   assert(#state.run_calls == 1, "expected TDD to run tests after saving current buffer")
+end
+
+local function test_tdd_locks_origin_buffer_and_restores_after_recovery()
+  reset_state()
+  neotest_mode = "fail-results"
+  state.mtimes["/tmp/sample_test.dart"] = 1000
+  state.open_bufs[2] = "/tmp/other.dart"
+  state.valid_buffers[2] = true
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  assert(state.commands[1] == "write", "expected save before TDD buffer becomes read-only")
+  assert(state.modifiable_by_buf[current_buf] == false, "expected originating TDD buffer to become read-only")
+  assert(state.modifiable_by_buf[2] == nil, "expected another open buffer to remain unchanged")
+
+  state.mtimes["/tmp/sample_test.dart"] = 2000
+  state.file_contents["/tmp/sample_test.dart"] = { "fixed" }
+  neotest_mode = "pass"
+  state.job_calls[1].opts.on_exit(1, 0)
+
+  assert(state.line_write_modifiable[current_buf] == true,
+    "expected Copilot disk changes to sync while originating buffer is temporarily writable")
+  assert(state.modifiable_by_buf[current_buf] == true,
+    "expected originating buffer editability restored after successful TDD completion")
+end
+
+local function test_tdd_restores_initially_read_only_buffer_on_terminal_failure()
+  reset_state()
+  neotest_mode = "fail-results"
+  state.modifiable_by_buf[current_buf] = false
+  state.jobstart_result = -1
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  assert(state.modifiable_by_buf[current_buf] == false,
+    "expected initially read-only buffer to remain read-only after failed Copilot launch")
+  assert(#state.option_writes >= 2 and state.option_writes[1].value == false
+      and state.option_writes[#state.option_writes].value == false,
+    "expected TDD lock to restore original read-only state on red completion")
+end
+
+local function test_tdd_restores_buffer_after_max_retries()
+  reset_state()
+  neotest_mode = "fail-results"
+  install_neotest()
+  local bot = load_bot()
+  bot.setup({ max_retries = 0 })
+  bot.run_tdd()
+
+  assert(state.modifiable_by_buf[current_buf] == true,
+    "expected TDD buffer editability restored after max retries are exhausted")
+  assert(#state.job_calls == 0, "expected no Copilot job when retry limit is zero")
+end
+
+local function test_tdd_lock_persists_through_refactoring_review()
+  reset_state()
+  neotest_mode = "pass"
+  state.buf_lines[current_buf] = { "// Refactoring: extract helper" }
+  state.file_contents["/tmp/sample_test.dart"] = { "// Refactoring: extract helper" }
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  assert(state.modifiable_by_buf[current_buf] == false,
+    "expected TDD buffer to remain read-only while queued refactoring awaits review")
+  state.file_contents["/tmp/sample_test.dart"] = { "local function helper() end" }
+  state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "a")()
+
+  assert(state.line_write_modifiable[current_buf] == true,
+    "expected accepted refactoring to update locked TDD buffer through plugin-owned write access")
+  assert(state.modifiable_by_buf[current_buf] == true,
+    "expected TDD buffer editability restored after queued refactoring completes")
+end
+
+local function test_tdd_refactoring_rejection_restores_buffer_while_locked()
+  reset_state()
+  neotest_mode = "pass"
+  local original = { "// Refactoring: extract helper" }
+  state.buf_lines[current_buf] = original
+  state.file_contents["/tmp/sample_test.dart"] = original
+  install_neotest()
+  local bot = load_bot()
+  bot.setup()
+  bot.run_tdd()
+
+  state.file_contents["/tmp/sample_test.dart"] = { "candidate" }
+  state.job_calls[1].opts.on_exit(1, 0)
+  popup_mapping(state.popup_calls[1], "r")()
+
+  assert(state.lines_by_buf[current_buf][1] == original[1],
+    "expected rejected refactoring to restore originating TDD buffer")
+  assert(state.line_write_modifiable[current_buf] == true,
+    "expected rejected refactoring restore to use plugin-owned write access")
+  assert(state.modifiable_by_buf[current_buf] == true,
+    "expected TDD buffer editability restored after rejected final refactoring")
 end
 
 local function test_model_mapping_prompts_for_typed_model_and_remembers_it()
@@ -1119,6 +1245,8 @@ local function test_tdd_reports_suite_that_never_starts()
   assert(#state.job_calls == 0, "expected an unstarted suite not to launch Copilot")
   assert(#state.notify_calls == 1 and state.notify_calls[1].msg:find("Timed out waiting", 1, true),
     "expected a clear error when the requested suite never starts")
+  assert(state.modifiable_by_buf[current_buf] == true,
+    "expected timed-out TDD suite to restore buffer writability")
 end
 
 local function test_tdd_loop_exposes_plugin_version()
@@ -2209,6 +2337,11 @@ test_saved_buffer_updates_status_buffer_total()
 test_restarted_suite_clears_previous_status_total()
 test_tdd_mode_setup_replaces_save_handler()
 test_tdd_saves_buffer_before_running_tests()
+test_tdd_locks_origin_buffer_and_restores_after_recovery()
+test_tdd_restores_initially_read_only_buffer_on_terminal_failure()
+test_tdd_restores_buffer_after_max_retries()
+test_tdd_lock_persists_through_refactoring_review()
+test_tdd_refactoring_rejection_restores_buffer_while_locked()
 test_model_mapping_prompts_for_typed_model_and_remembers_it()
 test_selected_model_applies_to_jobs_and_prompts_on_unavailable_model()
 test_custom_model_mapping_and_command_model_are_replaced()
@@ -2298,6 +2431,8 @@ vim.api.nvim_del_augroup_by_id = real.nvim_del_augroup_by_id
 vim.api.nvim_set_hl = real.nvim_set_hl
 vim.api.nvim_buf_clear_namespace = real.nvim_buf_clear_namespace
 vim.api.nvim_buf_add_highlight = real.nvim_buf_add_highlight
+vim.api.nvim_buf_call = real.nvim_buf_call
+vim.api.nvim_get_option_value = real.nvim_get_option_value
 vim.api.nvim_set_option_value = real.nvim_set_option_value
 vim.fn.readfile = real.readfile
 vim.fn.writefile = real.writefile
